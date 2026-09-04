@@ -7,6 +7,8 @@ import sys
 # terms. Extensions don't have it in the path (surely) because they want you to make and distribute
 # wheels. TODO: Do that instead, and figure out where the terms file ends up, or it fails silently.
 sys.path.append("/Users/spelufo/.local/lib/python3.13/site-packages")
+sys.path.append("/Users/spelufo/pro/vesuvius/villa/vesuvius/src")
+
 
 from . import renderer
 
