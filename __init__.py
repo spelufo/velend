@@ -10,10 +10,14 @@ sys.path.append("/Users/spelufo/.local/lib/python3.13/site-packages")
 sys.path.append("/Users/spelufo/pro/vesuvius/villa/vesuvius/src")
 
 
+from . import bricks
+from . import atlas
 from . import renderer
 from . import commands
 
 _modules = [
+	bricks,
+	atlas,
 	renderer,
 	commands,
 ]

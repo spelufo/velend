@@ -1,0 +1,9 @@
+void main() {
+  ivec3 local = ivec3(gl_GlobalInvocationID);
+  // The group size need not divide BRICK_SIZE, so the tail is masked off here.
+  if (any(greaterThanEqual(local, ivec3(BRICK_SIZE)))) {
+    return;
+  }
+  float value = texelFetch(brick, local, 0).r;
+  imageStore(atlas, dstOrigin + local, vec4(value, 0.0f, 0.0f, 0.0f));
+}

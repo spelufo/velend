@@ -6,11 +6,17 @@ from .renderer import VolumeSamplerRenderEngine
 class VLEND_OT_load_hires(bpy.types.Operator):
 	bl_idname = "vlend.load_hires"
 	bl_label = "Load High-Res Volume"
-	bl_description = "Load the high-resolution volume around the 3D cursor into the 3D texture"
+	bl_description = (
+		"Stream the high-resolution bricks nearest the 3D cursor into the brick atlas"
+	)
 	bl_options = {'REGISTER'}
 
 	def execute(self, context):
-		VolumeSamplerRenderEngine.load_hires_at(context.scene.cursor.location)
+		count = VolumeSamplerRenderEngine.retarget(context, context.scene.cursor.location)
+		if count == 0:
+			self.report({'WARNING'}, "No mesh geometry near the 3D cursor")
+		else:
+			self.report({'INFO'}, "Streaming %d bricks" % count)
 		return {'FINISHED'}
 
 
