@@ -1,0 +1,65 @@
+╭─── Claude Code v2.1.236 ─────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting        │
+│               Welcome back Santiago!               │ started                 │
+│                                                    │ Run /init to create a … │
+│                       ▐▛███▛█                      │ ─────────────────────── │
+│                      ▝▜██████▀                     │ What's new              │
+│                        ▝▝ ▝▝                       │ Added an "Organization… │
+│ Sonnet 5 · Claude API · santiagopelufo@gmail.com's │ Added `bashOutputMaxCh… │
+│ Organization                                       │ Added `--append-subage… │
+│                ~/pro/vesuvius/vlend                │ /release-notes for more │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ how does the imagestore thing work? does it streams the chunks into the gpu?  
+  I was told we couldn't write a 3d texture in place or something like that     
+
+  Searched for 2 patterns, ran 1 shell command (ctrl+o to expand)
+
+⏺ This confirms it — let me read the full atlas.py to explain the whole
+  mechanism precisely.
+
+  Read 2 files (ctrl+o to expand)
+
+⏺ Now I've got the full picture. Here's how it works:
+
+  "imageStore" is a GLSL function, not a class in this codebase — it's the
+  shader built-in for writing a single texel into an image-bound texture
+  (shaders/brick_copy.comp:8). That's the mechanism the "we can't write a 3D
+  texture in place" comment is about.
+
+  The constraint: Blender's GPUTexture API has no sub-region upload — you can
+  only supply data for a whole texture at creation time, or clear() it entirely.
+  There's no glTexSubImage3D-style "patch this corner of an existing 3D
+  texture" call exposed. So you can't just say "upload this small brick into a
+  slot of the big atlas."
+
+  The workaround, in atlas.py:
+  1. BrickAtlas.texture is one big R8 3D texture (the atlas), sized ATLAS_DIM³,
+     divided into a grid of fixed-size slots.
+  2. To add a brick (upload(), atlas.py:97):
+     - The brick's CPU-side numpy array is wrapped as a small GPUTexture of
+       exactly BRICK_SIZE³ — a staging texture, fully uploaded in one shot
+       (which is allowed, since it's a full-texture creation, not a sub-region
+       write).
+     - A compute shader (brick_copy.comp) is dispatched with the atlas bound as
+       a writable image (info.image(0, 'R8', 'FLOAT_3D', "atlas", 
+       qualifiers={'WRITE'})) and the staging texture bound as a sampler
+       (readable).
+     - Each GPU thread reads one texel from the staging texture via texelFetch
+       and writes it into the atlas at dstOrigin + local via imageStore —
+       dstOrigin being the slot's texel-space corner (slot_origin()).
+  3. This is effectively a GPU-side memcpy: staging texture → compute shader →
+     target region of the atlas, texel by texel, done entirely on the GPU
+     without ever reading the atlas back to CPU.
+  4. Separately, a small page table (sync_page()) maps volume chunks → atlas
+     slot index (or 0 if not resident). That one is rebuilt wholesale each time
+     it changes (it's cheap, R32F, one texel per chunk), unlike the atlas which
+     is only ever touched via the compute-shader patch.
+
+  So yes — bricks stream into the GPU, but not via a direct partial upload; they
+  go CPU → small staging texture → compute-shader copy → atlas slot. The
+  staging texture is the necessary detour because Blender doesn't let you write
+  directly into a sub-region of an existing 3D texture from the CPU side.
+
+✻ Churned for 28s

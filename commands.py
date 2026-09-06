@@ -12,7 +12,8 @@ class VLEND_OT_load_hires(bpy.types.Operator):
 	bl_options = {'REGISTER'}
 
 	def execute(self, context):
-		count = VolumeSamplerRenderEngine.retarget(context, context.scene.cursor.location)
+		depsgraph = context.evaluated_depsgraph_get()
+		count = VolumeSamplerRenderEngine.retarget(depsgraph, context.scene.cursor.location)
 		if count == 0:
 			self.report({'WARNING'}, "No mesh geometry near the 3D cursor")
 		else:

@@ -18,6 +18,9 @@ _SHADER_WATCH_INTERVAL = 0.25
 # `pump_uploads` would only drain while the user is otherwise generating
 # events (e.g. orbiting the viewport).
 _STREAM_WATCH_INTERVAL = 0.05
+# The 3D cursor is tool state, not depsgraph data, so moving it never reaches
+# `view_update`; polling is the same trick used above for the other two.
+_CURSOR_WATCH_INTERVAL = 0.1
 
 # Level 5 is the whole volume downsampled by 2^5, and is what fragments fall
 # back to wherever no brick is resident.
@@ -49,6 +52,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	# Chunks the focus point currently asks for. Bricks that finish loading after
 	# falling out of this set are dropped rather than uploaded.
 	wanted = frozenset()
+	# The focus last passed to `retarget`, compared against the live 3D cursor
+	# by `_watch_cursor` -- cursor moves aren't depsgraph updates, so nothing
+	# else notices them.
+	last_cursor = None
 
 	# Rebuilt only when the geometry of the scene changes.
 	batches = {}
@@ -244,13 +251,14 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		return batch_for_shader(cls.shader, 'TRIS', {"position": positions}, indices=indices)
 
 	@classmethod
-	def retarget(cls, context, focus):
+	def retarget(cls, depsgraph, focus):
 		"""Pick the chunks nearest the focus point and start streaming them in.
 
-		Runs from the operator, without a GPU context: it only decides what the
-		working set should be and queues the reads. `pump_uploads` moves the
-		results onto the GPU on the following draws.
+		Runs without a GPU context, from the operator or from `view_update`: it
+		only decides what the working set should be and queues the reads.
+		`pump_uploads` moves the results onto the GPU on the following draws.
 		"""
+		cls.last_cursor = tuple(focus)
 		cls.ensure_grid()
 		residency = cls.residency
 		dims = np.asarray(residency.dims, dtype=np.int64)
@@ -266,7 +274,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		hi = (hi_chunk + 1) * bricks.BRICK_CORE - 1.0
 
 		found = []
-		for instance in context.evaluated_depsgraph_get().object_instances:
+		for instance in depsgraph.object_instances:
 			obj = instance.object
 			if obj.type != 'MESH':
 				continue
@@ -283,6 +291,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		if not found:
 			residency.evict_outside(set())
 			cls.wanted = frozenset()
+			cls.loader.cancel_unwanted(cls.wanted)
 			cls.request_redraw()
 			return 0
 
@@ -299,6 +308,9 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 		cls.wanted = frozenset(int(k) for k in keys)
 		residency.evict_outside(cls.wanted)
+		# Frees the worker pool from stale reads queued by an earlier retarget
+		# (e.g. mid-drag) before dispatching this round's requests.
+		cls.loader.cancel_unwanted(cls.wanted)
 		for key, coord in zip(keys, coords):
 			key = int(key)
 			if key in residency.slot_of:
@@ -331,15 +343,35 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	def view_update(self, context, depsgraph):
 		# This runs outside of the drawing code, without an active GPU context,
-		# so it only invalidates the caches used by `view_draw`.
+		# so it only invalidates the caches used by `view_draw` and queues reads;
+		# it never touches the GPU itself.
 		self.live_instances.add(self)
-		if any(update.is_updated_geometry for update in depsgraph.updates):
+		geometry_changed = False
+		transform_changed = False
+		for update in depsgraph.updates:
+			geometry_changed |= update.is_updated_geometry
+			transform_changed |= update.is_updated_transform
+
+		if geometry_changed:
+			# Batches hold local-space positions only, so a transform-only change
+			# doesn't need them rebuilt -- `instance.matrix_world` is reapplied
+			# every draw regardless.
 			self.batches.clear()
 			self.meshes.clear()
 
+		if (geometry_changed or transform_changed) and self.residency is not None:
+			# Retargeting depends on world-space triangle positions, which a
+			# transform change moves just as much as an edit to the mesh itself.
+			self.retarget(depsgraph, context.scene.cursor.location)
+
 	def view_draw(self, context, depsgraph):
 		self.live_instances.add(self)
+		first_init = self.residency is None
 		self.ensure_gpu_resources()
+		if first_init and self.residency is not None:
+			# Otherwise nothing streams in until geometry changes or the operator
+			# runs, even though the grid (and so a focus point) already exists.
+			self.retarget(depsgraph, context.scene.cursor.location)
 		if self.shader is None:
 			return
 		self.pump_uploads()
@@ -388,15 +420,30 @@ def _watch_streaming():
 	return _STREAM_WATCH_INTERVAL
 
 
+def _watch_cursor():
+	cls = VolumeSamplerRenderEngine
+	scene = bpy.context.scene
+	if cls.residency is None or scene is None:
+		return _CURSOR_WATCH_INTERVAL
+	cursor = tuple(scene.cursor.location)
+	if cursor != cls.last_cursor:
+		cls.retarget(bpy.context.evaluated_depsgraph_get(), cursor)
+	return _CURSOR_WATCH_INTERVAL
+
+
 def register():
 	bpy.utils.register_class(VolumeSamplerRenderEngine)
 	if not bpy.app.timers.is_registered(_watch_shader_files):
 		bpy.app.timers.register(_watch_shader_files, persistent=True)
 	if not bpy.app.timers.is_registered(_watch_streaming):
 		bpy.app.timers.register(_watch_streaming, persistent=True)
+	if not bpy.app.timers.is_registered(_watch_cursor):
+		bpy.app.timers.register(_watch_cursor, persistent=True)
 
 
 def unregister():
+	if bpy.app.timers.is_registered(_watch_cursor):
+		bpy.app.timers.unregister(_watch_cursor)
 	if bpy.app.timers.is_registered(_watch_streaming):
 		bpy.app.timers.unregister(_watch_streaming)
 	if bpy.app.timers.is_registered(_watch_shader_files):

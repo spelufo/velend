@@ -87,7 +87,9 @@ class BrickLoader:
 			max_workers=LOADER_THREADS, thread_name_prefix="vlend-brick"
 		)
 		self.lock = threading.Lock()
-		self.inflight = set()
+		# key -> Future, so a stale request can still be cancelled while it's
+		# only sitting in the executor's queue rather than actually reading.
+		self.inflight = {}
 		# `vesuvius.Volume` makes no threadsafety promise, so each worker gets
 		# its own handle rather than sharing the one in `state`.
 		self.local = threading.local()
@@ -103,8 +105,23 @@ class BrickLoader:
 		with self.lock:
 			if key in self.inflight:
 				return
-			self.inflight.add(key)
-		self.executor.submit(self._load, key, chunk_xyz)
+			self.inflight[key] = self.executor.submit(self._load, key, chunk_xyz)
+
+	def cancel_unwanted(self, wanted):
+		"""Drop queued reads for chunks that fell out of `wanted`.
+
+		A future can only be cancelled while it's still sitting in the executor's
+		queue; one already reading off disk finishes normally, and its result is
+		silently discarded by the `wanted` check in `renderer.pump_uploads`. With
+		a handful of worker threads and dozens of requests queued during a drag,
+		most of the backlog is still cancellable, which is what actually frees
+		the workers up for the chunks currently wanted.
+		"""
+		with self.lock:
+			stale = [key for key in self.inflight if key not in wanted]
+			for key in stale:
+				if self.inflight[key].cancel():
+					del self.inflight[key]
 
 	def _load(self, key, chunk_xyz):
 		try:
@@ -123,7 +140,7 @@ class BrickLoader:
 			except queue.Empty:
 				break
 			with self.lock:
-				self.inflight.discard(item[0])
+				self.inflight.pop(item[0], None)
 			loaded.append(item)
 		return loaded
 
