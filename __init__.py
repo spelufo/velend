@@ -11,9 +11,11 @@ sys.path.append("/Users/spelufo/pro/vesuvius/villa/vesuvius/src")
 
 
 from . import renderer
+from . import commands
 
 _modules = [
-	renderer
+	renderer,
+	commands,
 ]
 
 _reload = "_loaded" in locals()

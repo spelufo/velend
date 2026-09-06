@@ -28,6 +28,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	hires_origin = (0.0, 0.0, 0.0)
 	hires_scale = (1.0, 1.0, 1.0)
 	hires_window = None
+	# CPU slice waiting to be uploaded on the next draw (GPU context required).
+	hires_pending = None
 	# Rebuilt only when the geometry of the scene changes.
 	batches = {}
 
@@ -88,7 +90,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.volume.filter_mode(True)
 
 	@classmethod
-	def ensure_hires(cls, cursor_location):
+	def load_hires_at(cls, cursor_location):
 		volume = state.get_volume()
 		hires_size = 1024
 		unit_scale = bpy.context.scene.unit_settings.scale_length
@@ -100,9 +102,11 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		imin = np.clip(imin, 0, np.maximum(shape_xyz - hires_size, 0))
 		imax = np.minimum(imin + hires_size, shape_xyz)
 		window = tuple(int(v) for v in (*imin, *imax))
-		# print(window)
-		if cls.volume_hires is not None and window == cls.hires_window:
-			# print('im out')
+		if (
+			cls.hires_pending is None
+			and cls.hires_window is not None
+			and window == cls.hires_window
+		):
 			return
 
 		xmin, ymin, zmin, xmax, ymax, zmax = window
@@ -110,8 +114,25 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		hires = np.ascontiguousarray(volume[zmin:zmax, ymin:ymax, xmin:xmax, 0], dtype=np.float32)
 		hires *= np.float32(1.0 / 255.0)
 		hires_dims = tuple(reversed(hires.shape))
-		cls.hires_origin = (xmin * voxel_size_hires, ymin * voxel_size_hires, zmin * voxel_size_hires)
-		cls.hires_scale = tuple(d * voxel_size_hires for d in hires_dims)
+		cls.hires_pending = (
+			hires,
+			window,
+			(xmin * voxel_size_hires, ymin * voxel_size_hires, zmin * voxel_size_hires),
+			tuple(d * voxel_size_hires for d in hires_dims),
+			hires_dims,
+		)
+		cls.tag_viewports()
+
+	@classmethod
+	def upload_pending_hires(cls):
+		pending = cls.hires_pending
+		if pending is None:
+			return
+
+		hires, window, origin, scale, hires_dims = pending
+		cls.hires_pending = None
+		cls.hires_origin = origin
+		cls.hires_scale = scale
 		cls.hires_window = window
 		print("Hires origin, scale: ", cls.hires_origin, cls.hires_scale)
 
@@ -121,6 +142,21 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			data=gpu.types.Buffer('FLOAT', hires.size, hires),
 		)
 		cls.volume_hires.filter_mode(True)
+
+	@classmethod
+	def ensure_hires_placeholder(cls):
+		if cls.volume_hires is not None:
+			return
+
+		# Bound so the shader sampler is valid before an explicit load. Origin is
+		# far from the volume so the fragment shader never samples this texel.
+		cls.volume_hires = gpu.types.GPUTexture(
+			(1, 1, 1),
+			format='R8',
+			data=gpu.types.Buffer('FLOAT', 1, np.zeros(1, dtype=np.float32)),
+		)
+		cls.hires_origin = (1.0e20, 1.0e20, 1.0e20)
+		cls.hires_scale = (1.0, 1.0, 1.0)
 
 	@classmethod
 	def ensure_shader(cls):
@@ -220,7 +256,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	def view_draw(self, context, depsgraph):
 		self.ensure_gpu_resources()
-		self.ensure_hires(context.scene.cursor.location)
+		self.upload_pending_hires()
+		self.ensure_hires_placeholder()
 		if self.shader is None:
 			return
 
