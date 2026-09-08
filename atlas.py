@@ -3,11 +3,11 @@
 Everything here needs an active GPU context, so it may only be touched from
 `view_draw`. The CPU side lives in `bricks.py`.
 
-Two textures back the streaming:
+Two textures back each streamed level:
 
-  atlas      a single big R8 3D texture holding SLOTS_PER_AXIS^3 padded bricks.
+	  atlas      a big R8 3D texture holding padded bricks.
   pageTable  one R32F texel per chunk of the whole volume, holding `slot + 1`
-             of the brick that chunk lives in, or 0 when it is not resident.
+	             of the brick that chunk lives in, or 0 when it is not resident.
 
 Blender's `GPUTexture` has no sub-region upload, so bricks reach the atlas by
 way of a small staging texture and a compute shader that copies it into place.
@@ -19,7 +19,7 @@ import os
 import gpu
 import numpy as np
 
-from .bricks import ATLAS_DIM, BRICK_SIZE, SLOTS_PER_AXIS
+from .bricks import BRICK_SIZE
 
 
 _SHADERS_DIR = os.path.join(os.path.dirname(__file__), "shaders")
@@ -41,19 +41,23 @@ def texture_data(array_zyx):
 	return gpu.types.Buffer('FLOAT', data.size, data)
 
 
-def slot_origin(slot):
+def slot_origin(slot, slots_per_axis):
 	"""Texel coordinate of a slot's corner within the atlas."""
 	return (
-		(slot % SLOTS_PER_AXIS) * BRICK_SIZE,
-		((slot // SLOTS_PER_AXIS) % SLOTS_PER_AXIS) * BRICK_SIZE,
-		(slot // (SLOTS_PER_AXIS * SLOTS_PER_AXIS)) * BRICK_SIZE,
+		(slot % slots_per_axis) * BRICK_SIZE,
+		((slot // slots_per_axis) % slots_per_axis) * BRICK_SIZE,
+		(slot // (slots_per_axis * slots_per_axis)) * BRICK_SIZE,
 	)
 
 
 class BrickAtlas:
-	def __init__(self, page_dims_xyz):
+	def __init__(self, page_dims_xyz, slots_per_axis):
 		self.page_dims = tuple(int(d) for d in page_dims_xyz)
-		self.texture = gpu.types.GPUTexture((ATLAS_DIM, ATLAS_DIM, ATLAS_DIM), format='R8')
+		self.slots_per_axis = int(slots_per_axis)
+		self.atlas_dim = self.slots_per_axis * BRICK_SIZE
+		self.texture = gpu.types.GPUTexture(
+			(self.atlas_dim, self.atlas_dim, self.atlas_dim), format='R8'
+		)
 		self.texture.filter_mode(True)
 		self.texture.clear(format='FLOAT', value=(0.0, 0.0, 0.0, 1.0))
 		self.page_texture = None
@@ -110,7 +114,7 @@ class BrickAtlas:
 		shader.bind()
 		shader.uniform_sampler("brick", staging)
 		shader.image("atlas", self.texture)
-		shader.uniform_int("dstOrigin", slot_origin(slot))
+		shader.uniform_int("dstOrigin", slot_origin(slot, self.slots_per_axis))
 		groups = -(-BRICK_SIZE // _COPY_GROUP)
 		gpu.compute.dispatch(shader, groups, groups, groups)
 		return True

@@ -4,25 +4,44 @@
 const float SAMPLE_DELTA = 1.0f;
 
 float sampleVolume(vec3 coord) {
-  // Which chunk of the volume this sample falls in, and where the page table
-  // says that chunk currently lives in the atlas. Slot 0 means "not resident".
+  // Try the full-resolution atlas first. Page-table value 0 means that the
+  // chunk is not resident; other values are atlas slot + 1.
   ivec3 chunk = ivec3(floor(coord / float(BRICK_CORE)));
   int slot = -1;
-  if (all(greaterThanEqual(chunk, ivec3(0))) && all(lessThan(chunk, PAGE_DIMS))) {
-    slot = int(texelFetch(pageTable, chunk, 0).r + 0.5f) - 1;
+  if (all(greaterThanEqual(chunk, ivec3(0))) && all(lessThan(chunk, L0_PAGE_DIMS))) {
+    slot = int(texelFetch(l0PageTable, chunk, 0).r + 0.5f) - 1;
   }
 
   if (slot >= 0) {
     ivec3 slotCoord = ivec3(
-      slot % SLOTS_PER_AXIS,
-      (slot / SLOTS_PER_AXIS) % SLOTS_PER_AXIS,
-      slot / (SLOTS_PER_AXIS * SLOTS_PER_AXIS));
+      slot % L0_SLOTS_PER_AXIS,
+      (slot / L0_SLOTS_PER_AXIS) % L0_SLOTS_PER_AXIS,
+      slot / (L0_SLOTS_PER_AXIS * L0_SLOTS_PER_AXIS));
     // Texel `BRICK_PAD` of a brick is the first voxel of its core, so a sample
     // on a core face lands exactly between the same two voxels whichever of the
     // two neighbouring bricks it is taken from. That is what hides the seams.
     vec3 local = clamp(coord - vec3(chunk) * float(BRICK_CORE), 0.0f, float(BRICK_CORE));
     vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local;
-    return texture(atlas, texel / float(ATLAS_DIM)).r;
+    return texture(l0Atlas, texel / float(L0_ATLAS_DIM)).r;
+  }
+
+  // L1 has the same brick geometry in its own voxel space, with each voxel
+  // spanning two L0 voxels on every axis.
+  vec3 l1Coord = coord * 0.5f;
+  chunk = ivec3(floor(l1Coord / float(BRICK_CORE)));
+  slot = -1;
+  if (all(greaterThanEqual(chunk, ivec3(0))) && all(lessThan(chunk, L1_PAGE_DIMS))) {
+    slot = int(texelFetch(l1PageTable, chunk, 0).r + 0.5f) - 1;
+  }
+
+  if (slot >= 0) {
+    ivec3 slotCoord = ivec3(
+      slot % L1_SLOTS_PER_AXIS,
+      (slot / L1_SLOTS_PER_AXIS) % L1_SLOTS_PER_AXIS,
+      slot / (L1_SLOTS_PER_AXIS * L1_SLOTS_PER_AXIS));
+    vec3 local = clamp(l1Coord - vec3(chunk) * float(BRICK_CORE), 0.0f, float(BRICK_CORE));
+    vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local;
+    return texture(l1Atlas, texel / float(L1_ATLAS_DIM)).r;
   }
   return texture(volume, coord / volumeUniforms.loresExtent).r;
 }

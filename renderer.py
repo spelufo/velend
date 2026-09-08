@@ -44,14 +44,17 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	lores_extent = (1.0, 1.0, 1.0)
 	shape_xyz = None
 
-	# Brick streaming. `residency` and `loader` are CPU only so the operator can
-	# retarget without a GPU context; `atlas` owns the textures.
-	atlas = None
-	residency = None
+	# Brick streaming. Residency and loader state are CPU only so the operator
+	# can retarget without a GPU context; the atlases own the textures.
+	atlases = {}
+	residencies = {}
 	loader = None
-	# Chunks the focus point currently asks for. Bricks that finish loading after
-	# falling out of this set are dropped rather than uploaded.
-	wanted = frozenset()
+	shapes_xyz = {}
+	# Chunks the focus point currently asks for, per pyramid level. Completed
+	# reads that fall out of these sets are dropped rather than uploaded.
+	wanted = {0: frozenset(), 1: frozenset()}
+	# L1 starts only after all current L0 work has reached the atlas.
+	pending_l1 = ()
 	# The focus last passed to `retarget`, compared against the live 3D cursor
 	# by `_watch_cursor` -- cursor moves aren't depsgraph updates, so nothing
 	# else notices them.
@@ -95,17 +98,33 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	@classmethod
 	def ensure_grid(cls):
 		"""Set up the chunk grid and the brick loader. No GPU context needed."""
-		if cls.residency is not None:
+		if cls.residencies:
 			return
 
 		volume = state.get_volume()
-		cls.shape_xyz = tuple(int(s) for s in reversed(volume.shape(0)))
+		cls.shapes_xyz = {
+			level: tuple(int(s) for s in reversed(volume.shape(level)))
+			for level in (0, 1)
+		}
+		cls.shape_xyz = cls.shapes_xyz[0]
 		unit_scale = bpy.context.scene.unit_settings.scale_length
 		# Full-res voxels are `volume.resolution` µm across.
 		cls.voxels_per_unit = (1000000.0 * unit_scale) / volume.resolution
-		cls.residency = bricks.Residency(bricks.grid_dims(cls.shape_xyz))
-		cls.loader = bricks.BrickLoader(cls.shape_xyz)
-		print("vlend: chunk grid", cls.residency.dims, "over", cls.shape_xyz, "voxels")
+		cls.residencies = {
+			level: bricks.Residency(
+				bricks.grid_dims(cls.shapes_xyz[level]), bricks.SLOT_COUNTS[level]
+			)
+			for level in (0, 1)
+		}
+		cls.loader = bricks.BrickLoader(cls.shapes_xyz)
+		for level in (0, 1):
+			print(
+				"vlend: L%d chunk grid" % level,
+				cls.residencies[level].dims,
+				"over",
+				cls.shapes_xyz[level],
+				"voxels",
+			)
 
 	@classmethod
 	def ensure_volume(cls):
@@ -131,12 +150,17 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.volume.filter_mode(True)
 
 	@classmethod
-	def ensure_atlas(cls):
-		if cls.atlas is not None:
+	def ensure_atlases(cls):
+		if cls.atlases:
 			return
-		cls.atlas = atlas_module.BrickAtlas(cls.residency.dims)
-		cls.atlas.sync_page(cls.residency.page)
-		cls.residency.dirty = False
+		for level in (0, 1):
+			residency = cls.residencies[level]
+			atlas = atlas_module.BrickAtlas(
+				residency.dims, bricks.SLOTS_PER_AXIS[level]
+			)
+			atlas.sync_page(residency.page)
+			residency.dirty = False
+			cls.atlases[level] = atlas
 
 	@classmethod
 	def ensure_shader(cls):
@@ -162,9 +186,12 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		shader_info.define("BRICK_CORE", str(bricks.BRICK_CORE))
 		shader_info.define("BRICK_PAD", str(bricks.BRICK_PAD))
 		shader_info.define("BRICK_SIZE", str(bricks.BRICK_SIZE))
-		shader_info.define("SLOTS_PER_AXIS", str(bricks.SLOTS_PER_AXIS))
-		shader_info.define("ATLAS_DIM", str(bricks.ATLAS_DIM))
-		shader_info.define("PAGE_DIMS", "ivec3(%d, %d, %d)" % cls.residency.dims)
+		shader_info.define("L0_SLOTS_PER_AXIS", str(bricks.SLOTS_PER_AXIS[0]))
+		shader_info.define("L1_SLOTS_PER_AXIS", str(bricks.SLOTS_PER_AXIS[1]))
+		shader_info.define("L0_ATLAS_DIM", str(bricks.ATLAS_DIMS[0]))
+		shader_info.define("L1_ATLAS_DIM", str(bricks.ATLAS_DIMS[1]))
+		shader_info.define("L0_PAGE_DIMS", "ivec3(%d, %d, %d)" % cls.residencies[0].dims)
+		shader_info.define("L1_PAGE_DIMS", "ivec3(%d, %d, %d)" % cls.residencies[1].dims)
 		shader_info.typedef_source("""
 			struct VolumeUniforms {
 				mat4 viewProjectionMatrix;
@@ -175,8 +202,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		""")
 		shader_info.uniform_buf(0, "VolumeUniforms", "volumeUniforms")
 		shader_info.sampler(0, 'FLOAT_3D', "volume")
-		shader_info.sampler(1, 'FLOAT_3D', "atlas")
-		shader_info.sampler(2, 'FLOAT_3D', "pageTable")
+		shader_info.sampler(1, 'FLOAT_3D', "l0Atlas")
+		shader_info.sampler(2, 'FLOAT_3D', "l0PageTable")
+		shader_info.sampler(3, 'FLOAT_3D', "l1Atlas")
+		shader_info.sampler(4, 'FLOAT_3D', "l1PageTable")
 		shader_info.vertex_in(0, 'VEC3', "position")
 		shader_info.vertex_out(vert_out)
 		shader_info.fragment_out(0, 'VEC4', "FragColor")
@@ -199,7 +228,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	def ensure_gpu_resources(cls):
 		cls.ensure_grid()
 		cls.ensure_volume()
-		cls.ensure_atlas()
+		cls.ensure_atlases()
 		cls.ensure_shader()
 
 	@classmethod
@@ -260,14 +289,15 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		"""
 		cls.last_cursor = tuple(focus)
 		cls.ensure_grid()
-		residency = cls.residency
-		dims = np.asarray(residency.dims, dtype=np.int64)
+		l0_residency = cls.residencies[0]
+		l1_residency = cls.residencies[1]
+		dims = np.asarray(l0_residency.dims, dtype=np.int64)
 		focus_voxel = np.asarray(focus, dtype=np.float64) * cls.voxels_per_unit
 
-		# Only triangles within reach of the focus can contribute, which keeps
-		# this bounded no matter how large the meshes are.
+		# Search the full two-level reach in L0 space. L0 takes the nearest
+		# candidates across it; only the remainder is collapsed into L1 chunks.
 		focus_chunk = focus_voxel / bricks.BRICK_CORE
-		radius = bricks.FOCUS_RADIUS_CHUNKS
+		radius = bricks.L1_FOCUS_RADIUS_CHUNKS * 2
 		lo_chunk = np.clip(np.floor(focus_chunk - radius), 0, dims - 1)
 		hi_chunk = np.clip(np.ceil(focus_chunk + radius), 0, dims - 1)
 		lo = lo_chunk * bricks.BRICK_CORE
@@ -289,56 +319,84 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 				found.append(chunks)
 
 		if not found:
-			residency.evict_outside(set())
-			cls.wanted = frozenset()
-			cls.loader.cancel_unwanted(cls.wanted)
+			for residency in cls.residencies.values():
+				residency.evict_outside(set())
+			cls.wanted = {0: frozenset(), 1: frozenset()}
+			cls.pending_l1 = ()
+			cls.loader.cancel_unwanted(set())
 			cls.request_redraw()
 			return 0
 
 		chunks = np.clip(np.concatenate(found), 0, dims - 1)
-		# Deduplicate on the flat key rather than on rows; it is the same answer
-		# and vastly cheaper for a dense triangle soup.
-		keys = np.unique(residency.keys_of(chunks))
-		nx, ny, _ = residency.dims
-		coords = np.stack([keys % nx, (keys // nx) % ny, keys // (nx * ny)], axis=1)
-		centers = (coords + 0.5) * bricks.BRICK_CORE
-		nearest = np.argsort(np.linalg.norm(centers - focus_voxel, axis=1))[:bricks.SLOT_COUNT]
-		keys = keys[nearest]
-		coords = coords[nearest]
+		(l0_keys, l0_coords), (l1_keys, l1_coords) = bricks.select_lod_chunks(
+			chunks, l0_residency.dims, l1_residency.dims, focus_voxel
+		)
 
-		cls.wanted = frozenset(int(k) for k in keys)
-		residency.evict_outside(cls.wanted)
+		cls.wanted = {
+			0: frozenset(int(k) for k in l0_keys),
+			1: frozenset(int(k) for k in l1_keys),
+		}
+		for level in (0, 1):
+			cls.residencies[level].evict_outside(cls.wanted[level])
 		# Frees the worker pool from stale reads queued by an earlier retarget
 		# (e.g. mid-drag) before dispatching this round's requests.
-		cls.loader.cancel_unwanted(cls.wanted)
-		for key, coord in zip(keys, coords):
+		wanted_requests = {
+			(level, key) for level in (0, 1) for key in cls.wanted[level]
+		}
+		cls.loader.cancel_unwanted(wanted_requests)
+		for key, coord in zip(l0_keys, l0_coords):
 			key = int(key)
-			if key in residency.slot_of:
+			if key in l0_residency.slot_of:
 				continue
-			cls.loader.request(key, (int(coord[0]), int(coord[1]), int(coord[2])))
+			cls.loader.request(0, key, tuple(int(c) for c in coord))
+
+		cls.pending_l1 = tuple(
+			(int(key), tuple(int(c) for c in coord))
+			for key, coord in zip(l1_keys, l1_coords)
+			if int(key) not in l1_residency.slot_of
+		)
+		cls.queue_l1_if_ready()
 
 		cls.request_redraw()
-		return len(keys)
+		return len(l0_keys) + len(l1_keys)
+
+	@classmethod
+	def queue_l1_if_ready(cls):
+		"""Start pending L1 reads only after all earlier L0 work is drained."""
+		if not cls.pending_l1 or not cls.loader.idle():
+			return
+		pending = cls.pending_l1
+		cls.pending_l1 = ()
+		for key, coord in pending:
+			if key in cls.wanted[1] and key not in cls.residencies[1].slot_of:
+				cls.loader.request(1, key, coord)
 
 	@classmethod
 	def pump_uploads(cls):
-		"""Move finished bricks into the atlas. Only valid inside `view_draw`."""
+		"""Move finished bricks into their atlases. Only valid inside `view_draw`."""
 		loaded = cls.loader.drain(bricks.UPLOADS_PER_DRAW)
-		for key, brick in loaded:
-			if brick is None or key not in cls.wanted:
+		for request_key, brick in loaded:
+			level, key = request_key
+			if brick is None or key not in cls.wanted[level]:
 				continue
-			slot = cls.residency.place(key)
+			residency = cls.residencies[level]
+			slot = residency.place(key)
 			if slot is None:
 				continue
-			cls.atlas.upload(slot, brick)
+			if not cls.atlases[level].upload(slot, brick):
+				residency.release(key)
 
 		# After the uploads, so the page table never points at a slot whose
 		# brick has not been written yet.
-		if cls.residency.dirty:
-			cls.atlas.sync_page(cls.residency.page)
-			cls.residency.dirty = False
+		for level in (0, 1):
+			residency = cls.residencies[level]
+			if residency.dirty:
+				cls.atlases[level].sync_page(residency.page)
+				residency.dirty = False
 
-		if loaded or not cls.loader.idle():
+		cls.queue_l1_if_ready()
+
+		if loaded or cls.pending_l1 or not cls.loader.idle():
 			cls.request_redraw()
 
 	def view_update(self, context, depsgraph):
@@ -359,16 +417,16 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			self.batches.clear()
 			self.meshes.clear()
 
-		if (geometry_changed or transform_changed) and self.residency is not None:
+		if (geometry_changed or transform_changed) and self.residencies:
 			# Retargeting depends on world-space triangle positions, which a
 			# transform change moves just as much as an edit to the mesh itself.
 			self.retarget(depsgraph, context.scene.cursor.location)
 
 	def view_draw(self, context, depsgraph):
 		self.live_instances.add(self)
-		first_init = self.residency is None
+		first_init = not self.residencies
 		self.ensure_gpu_resources()
-		if first_init and self.residency is not None:
+		if first_init and self.residencies:
 			# Otherwise nothing streams in until geometry changes or the operator
 			# runs, even though the grid (and so a focus point) already exists.
 			self.retarget(depsgraph, context.scene.cursor.location)
@@ -382,8 +440,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		gpu.state.depth_mask_set(True)
 
 		self.shader.uniform_sampler("volume", self.volume)
-		self.shader.uniform_sampler("atlas", self.atlas.texture)
-		self.shader.uniform_sampler("pageTable", self.atlas.page_texture)
+		self.shader.uniform_sampler("l0Atlas", self.atlases[0].texture)
+		self.shader.uniform_sampler("l0PageTable", self.atlases[0].page_texture)
+		self.shader.uniform_sampler("l1Atlas", self.atlases[1].texture)
+		self.shader.uniform_sampler("l1PageTable", self.atlases[1].page_texture)
 
 		# Iterating the instances also draws the duplis and the geometry nodes instances,
 		# which share the batch of the object they instance.
@@ -423,7 +483,7 @@ def _watch_streaming():
 def _watch_cursor():
 	cls = VolumeSamplerRenderEngine
 	scene = bpy.context.scene
-	if cls.residency is None or scene is None:
+	if not cls.residencies or scene is None:
 		return _CURSOR_WATCH_INTERVAL
 	cursor = tuple(scene.cursor.location)
 	if cursor != cls.last_cursor:

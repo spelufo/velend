@@ -3,8 +3,8 @@
 Nothing in here touches `gpu`, so it can run from operators and worker threads,
 where no GPU context exists. `atlas.py` owns the matching GPU resources.
 
-The volume is cut into a grid of cubic chunks of `BRICK_CORE` level 0 voxels.
-A chunk that is resident on the GPU occupies one slot of the brick atlas, and
+Each pyramid level is cut into a grid of cubic chunks of `BRICK_CORE` voxels.
+A chunk that is resident on the GPU occupies one slot of its level's atlas, and
 is stored there padded by `BRICK_PAD` voxels of its neighbours on every side so
 that hardware trilinear filtering stays seamless right up to the core boundary.
 """
@@ -18,21 +18,22 @@ import numpy as np
 from . import state
 
 
-# Brick geometry, in level 0 voxels.
+# Brick geometry, in voxels of the level being loaded.
 BRICK_CORE = 64
 BRICK_PAD = 1
 BRICK_SIZE = BRICK_CORE + 2 * BRICK_PAD
 
-# The atlas is a cube of SLOTS_PER_AXIS^3 bricks: 12^3 bricks of 66^3 R8 texels
-# is a 792^3 texture, about 497MB on the GPU.
-SLOTS_PER_AXIS = 12
-SLOT_COUNT = SLOTS_PER_AXIS ** 3
-ATLAS_DIM = SLOTS_PER_AXIS * BRICK_SIZE
+# Atlas capacity is independently tunable for each streamed pyramid level.
+# L0 is 792^3 R8 (~497MB); L1 is 660^3 R8 (~287MB).
+L0_SLOTS_PER_AXIS = 12
+L1_SLOTS_PER_AXIS = 10
+SLOTS_PER_AXIS = (L0_SLOTS_PER_AXIS, L1_SLOTS_PER_AXIS)
+SLOT_COUNTS = tuple(n ** 3 for n in SLOTS_PER_AXIS)
+ATLAS_DIMS = tuple(n * BRICK_SIZE for n in SLOTS_PER_AXIS)
 
-# Chunks further than this from the focus are never candidates. 40 chunks is
-# 2560 voxels, ~24mm, already past what SLOT_COUNT bricks can cover even when
-# the meshes are a single flat sheet.
-FOCUS_RADIUS_CHUNKS = 40
+# The combined working set reaches this many L1 chunks from the focus, or twice
+# as many L0 chunks because L1 is downsampled by two on every axis.
+L1_FOCUS_RADIUS_CHUNKS = 40
 
 # Bricks uploaded per redraw. Each one is a staging texture plus a compute
 # dispatch, so a handful per frame keeps the viewport responsive while the
@@ -46,7 +47,59 @@ def grid_dims(shape_xyz):
 	return tuple(int(-(-int(s) // BRICK_CORE)) for s in shape_xyz)
 
 
-def read_brick(volume, shape_xyz, chunk_xyz):
+def select_lod_chunks(chunks, l0_dims, l1_dims, focus_voxel):
+	"""Split mesh-intersecting L0 chunks into nearest L0 and L1 overflow.
+
+	Returns ``((l0_keys, l0_coords), (l1_keys, l1_coords))`` with each level
+	ordered nearest-first and capped to that atlas's capacity.
+	"""
+	l0_dims = np.asarray(l0_dims, dtype=np.int64)
+	l1_dims = np.asarray(l1_dims, dtype=np.int64)
+	focus_voxel = np.asarray(focus_voxel, dtype=np.float64)
+	chunks = np.clip(np.asarray(chunks, dtype=np.int64), 0, l0_dims - 1)
+	if not len(chunks):
+		empty_keys = np.zeros(0, dtype=np.int64)
+		empty_coords = np.zeros((0, 3), dtype=np.int64)
+		return (empty_keys, empty_coords), (empty_keys.copy(), empty_coords.copy())
+
+	# Use flat keys to deduplicate efficiently, then recover XYZ coordinates.
+	nx0, ny0, _ = (int(d) for d in l0_dims)
+	keys = np.unique((chunks[:, 2] * ny0 + chunks[:, 1]) * nx0 + chunks[:, 0])
+	coords = np.stack(
+		[keys % nx0, (keys // nx0) % ny0, keys // (nx0 * ny0)], axis=1
+	)
+	centers = (coords + 0.5) * BRICK_CORE
+	nearest = np.argsort(
+		np.linalg.norm(centers - focus_voxel, axis=1), kind='stable'
+	)
+	ordered_keys = keys[nearest]
+	ordered_coords = coords[nearest]
+	l0_count = min(len(ordered_keys), SLOT_COUNTS[0])
+	l0 = (ordered_keys[:l0_count], ordered_coords[:l0_count])
+
+	overflow = ordered_coords[l0_count:]
+	if not len(overflow):
+		empty_keys = np.zeros(0, dtype=np.int64)
+		empty_coords = np.zeros((0, 3), dtype=np.int64)
+		return l0, (empty_keys, empty_coords)
+
+	l1_chunks = np.clip(overflow // 2, 0, l1_dims - 1)
+	nx1, ny1, _ = (int(d) for d in l1_dims)
+	l1_keys = np.unique(
+		(l1_chunks[:, 2] * ny1 + l1_chunks[:, 1]) * nx1 + l1_chunks[:, 0]
+	)
+	l1_coords = np.stack(
+		[l1_keys % nx1, (l1_keys // nx1) % ny1, l1_keys // (nx1 * ny1)],
+		axis=1,
+	)
+	l1_centers_l0 = (l1_coords + 0.5) * BRICK_CORE * 2
+	l1_nearest = np.argsort(
+		np.linalg.norm(l1_centers_l0 - focus_voxel, axis=1), kind='stable'
+	)[:SLOT_COUNTS[1]]
+	return l0, (l1_keys[l1_nearest], l1_coords[l1_nearest])
+
+
+def read_brick(volume, shape_xyz, chunk_xyz, level=0):
 	"""Read one padded brick out of the volume, as float32 in [0, 1].
 
 	Returned in numpy (Z, Y, X) order, ready for a GPUTexture staging buffer.
@@ -60,12 +113,12 @@ def read_brick(volume, shape_xyz, chunk_xyz):
 	if np.any(clipped_hi <= clipped_lo):
 		return brick
 
-	# The volume is indexed (Z, Y, X, level); level 0 is full resolution.
+	# The volume is indexed (Z, Y, X, level).
 	data = volume[
 		clipped_lo[2]:clipped_hi[2],
 		clipped_lo[1]:clipped_hi[1],
 		clipped_lo[0]:clipped_hi[0],
-		0,
+		level,
 	]
 	off = clipped_lo - lo
 	brick[
@@ -80,8 +133,11 @@ def read_brick(volume, shape_xyz, chunk_xyz):
 class BrickLoader:
 	"""Reads bricks off disk on worker threads, never blocking the UI thread."""
 
-	def __init__(self, shape_xyz):
-		self.shape_xyz = np.asarray(shape_xyz, dtype=np.int64)
+	def __init__(self, shapes_xyz):
+		self.shapes_xyz = {
+			int(level): np.asarray(shape, dtype=np.int64)
+			for level, shape in shapes_xyz.items()
+		}
 		self.done = queue.Queue()
 		self.executor = ThreadPoolExecutor(
 			max_workers=LOADER_THREADS, thread_name_prefix="vlend-brick"
@@ -101,11 +157,14 @@ class BrickLoader:
 			self.local.volume = volume
 		return volume
 
-	def request(self, key, chunk_xyz):
+	def request(self, level, key, chunk_xyz):
+		request_key = (int(level), int(key))
 		with self.lock:
-			if key in self.inflight:
+			if request_key in self.inflight:
 				return
-			self.inflight[key] = self.executor.submit(self._load, key, chunk_xyz)
+			self.inflight[request_key] = self.executor.submit(
+				self._load, request_key, chunk_xyz
+			)
 
 	def cancel_unwanted(self, wanted):
 		"""Drop queued reads for chunks that fell out of `wanted`.
@@ -123,13 +182,16 @@ class BrickLoader:
 				if self.inflight[key].cancel():
 					del self.inflight[key]
 
-	def _load(self, key, chunk_xyz):
+	def _load(self, request_key, chunk_xyz):
+		level, _ = request_key
 		try:
-			brick = read_brick(self.volume(), self.shape_xyz, chunk_xyz)
+			brick = read_brick(
+				self.volume(), self.shapes_xyz[level], chunk_xyz, level=level
+			)
 		except Exception as error:
-			print("vlend: brick load failed at", chunk_xyz, error)
+			print("vlend: L%d brick load failed at" % level, chunk_xyz, error)
 			brick = None
-		self.done.put((key, brick))
+		self.done.put((request_key, brick))
 
 	def drain(self, limit):
 		"""Pop up to `limit` finished bricks. Returns [(key, brick_or_None)]."""
@@ -157,19 +219,19 @@ class Residency:
 
 	`page` is the CPU mirror of the page table texture: one entry per chunk of
 	the whole volume, holding `slot + 1`, or 0 when the chunk is not resident
-	and the fragment shader should fall back to the low resolution volume. It
-	is float32 because that is the only buffer format `GPUTexture` accepts;
+	and the fragment shader should fall back to the next coarser source. It is
+	float32 because that is the only buffer format `GPUTexture` accepts;
 	slot indices are small enough to be exact.
 	"""
 
-	def __init__(self, dims_xyz):
+	def __init__(self, dims_xyz, slot_count):
 		self.dims = tuple(int(d) for d in dims_xyz)
 		nx, ny, nz = self.dims
 		self.page = np.zeros((nz, ny, nx), dtype=np.float32)
 		self.flat = self.page.reshape(-1)
 		self.slot_of = {}
-		self.chunk_of = [None] * SLOT_COUNT
-		self.free = list(reversed(range(SLOT_COUNT)))
+		self.chunk_of = [None] * int(slot_count)
+		self.free = list(reversed(range(int(slot_count))))
 		self.dirty = True
 
 	def chunk_xyz(self, key):
@@ -202,6 +264,16 @@ class Residency:
 		self.flat[key] = slot + 1
 		self.dirty = True
 		return slot
+
+	def release(self, key):
+		"""Undo a placement, for example when its GPU upload failed."""
+		slot = self.slot_of.pop(key, None)
+		if slot is None:
+			return
+		self.chunk_of[slot] = None
+		self.free.append(slot)
+		self.flat[key] = 0
+		self.dirty = True
 
 
 def chunks_near(voxels, indices, lo, hi):

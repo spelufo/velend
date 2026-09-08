@@ -7,7 +7,7 @@ class VLEND_OT_load_hires(bpy.types.Operator):
 	bl_idname = "vlend.load_hires"
 	bl_label = "Load High-Res Volume"
 	bl_description = (
-		"Stream the high-resolution bricks nearest the 3D cursor into the brick atlas"
+		"Stream L0 detail and L1 fallback bricks around meshes nearest the 3D cursor"
 	)
 	bl_options = {'REGISTER'}
 
