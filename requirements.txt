@@ -1,0 +1,8 @@
+# The extension's only direct dependency. Everything else that ends up in
+# `wheels/` is pulled in transitively.
+#
+# `scripts/develop.py` installs this into Blender's own Python.
+# `scripts/build.py` bundles it into the extension as wheels.
+#
+# Blender's Python already ships numpy, so that is never bundled.
+zarr>=2.18.7,<4

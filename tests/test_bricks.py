@@ -12,47 +12,45 @@ PACKAGE = "velend_test"
 package = types.ModuleType(PACKAGE)
 package.__path__ = [str(ROOT)]
 sys.modules.setdefault(PACKAGE, package)
-sys.modules.setdefault(PACKAGE + ".state", types.ModuleType(PACKAGE + ".state"))
 spec = importlib.util.spec_from_file_location(PACKAGE + ".bricks", ROOT / "bricks.py")
 bricks = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = bricks
 spec.loader.exec_module(bricks)
 
 
-class FakeVolume:
-	def __init__(self):
+class FakeArray:
+	"""Stands in for one level's zarr array."""
+
+	def __init__(self, shape, fill=255):
+		self.shape = shape
+		self.fill = fill
 		self.requests = []
 
 	def __getitem__(self, index):
 		self.requests.append(index)
-		z, y, x, _level = index
+		z, y, x = index
 		shape = (
 			z.stop - z.start,
 			y.stop - y.start,
 			x.stop - x.start,
 		)
-		return np.full(shape, 255.0, dtype=np.float32)
-
-
-class EmptyVolume(FakeVolume):
-	def __getitem__(self, index):
-		data = super().__getitem__(index)
-		data.fill(0.0)
-		return data
+		return np.full(shape, self.fill, dtype=np.uint8)
 
 
 class BrickTests(unittest.TestCase):
-	def test_read_brick_uses_requested_level_and_boundary_padding(self):
-		volume = FakeVolume()
-		brick = bricks.read_brick(volume, (6, 5, 4), (0, 0, 0), level=4)
+	def test_read_brick_clips_to_the_array_and_pads_the_boundary(self):
+		array = FakeArray((4, 5, 6))
+		brick = bricks.read_brick(array, (0, 0, 0))
 
-		self.assertEqual(volume.requests[0][-1], 4)
+		self.assertEqual(
+			array.requests[0], (slice(0, 4), slice(0, 5), slice(0, 6))
+		)
 		self.assertEqual(brick.shape, (66, 66, 66))
 		np.testing.assert_array_equal(brick[1:5, 1:6, 1:7], 1.0)
 		self.assertEqual(float(brick[0, 0, 0]), 0.0)
 
 	def test_fully_black_read_is_reported_as_empty(self):
-		brick = bricks.read_brick(EmptyVolume(), (6, 5, 4), (0, 0, 0), level=2)
+		brick = bricks.read_brick(FakeArray((4, 5, 6), fill=0), (0, 0, 0))
 		self.assertIs(brick, bricks.EMPTY_BRICK)
 
 	def test_coarser_levels_are_empty_until_finer_capacity_is_exceeded(self):

@@ -104,20 +104,20 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 		volume = state.get_volume()
 		cls.shapes_xyz = {
-			level: tuple(int(s) for s in reversed(volume.shape(level)))
+			level: tuple(int(s) for s in reversed(volume[level].shape))
 			for level in bricks.ACTIVE_LEVELS
 		}
 		cls.shape_xyz = cls.shapes_xyz[0]
 		unit_scale = bpy.context.scene.unit_settings.scale_length
-		# Full-res voxels are `volume.resolution` µm across.
-		cls.voxels_per_unit = (1000000.0 * unit_scale) / volume.resolution
+		# Full-res voxels are `state.resolution` µm across.
+		cls.voxels_per_unit = (1000000.0 * unit_scale) / state.resolution
 		cls.residencies = {
 			level: bricks.Residency(
 				bricks.grid_dims(cls.shapes_xyz[level]), bricks.SLOT_COUNTS[level]
 			)
 			for level in bricks.ACTIVE_LEVELS
 		}
-		cls.loader = bricks.BrickLoader(cls.shapes_xyz)
+		cls.loader = bricks.BrickLoader(volume)
 		cls.empty_chunks = {level: set() for level in bricks.ACTIVE_LEVELS}
 		cls.fallback_keys = {level: set() for level in bricks.ACTIVE_LEVELS}
 		for level in bricks.ACTIVE_LEVELS:
@@ -136,7 +136,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 		volume = state.get_volume()
 		lores = np.ascontiguousarray(
-			volume[:, :, :, bricks.FALLBACK_LEVEL], dtype=np.float32
+			volume[bricks.FALLBACK_LEVEL][:], dtype=np.float32
 		)
 		lores *= np.float32(1.0 / 255.0)
 

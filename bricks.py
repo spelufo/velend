@@ -16,8 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from . import state
-
 
 # Brick geometry, in voxels of the level being loaded.
 BRICK_CORE = 64
@@ -141,12 +139,14 @@ def select_lod_chunks(chunks, level_dims, focus_voxel, slot_counts=None):
 	return selected
 
 
-def read_brick(volume, shape_xyz, chunk_xyz, level=0):
+def read_brick(array, chunk_xyz):
 	"""Read one padded brick, or return EMPTY_BRICK when every voxel is zero.
 
-	Returned in numpy (Z, Y, X) order, ready for a GPUTexture staging buffer.
-	Padding that falls outside the volume is left at zero.
+	`array` is the zarr array of the level being loaded. The brick is returned
+	in numpy (Z, Y, X) order, ready for a GPUTexture staging buffer. Padding
+	that falls outside the volume is left at zero.
 	"""
+	shape_xyz = np.asarray(array.shape[::-1], dtype=np.int64)
 	lo = np.asarray(chunk_xyz, dtype=np.int64) * BRICK_CORE - BRICK_PAD
 	hi = lo + BRICK_SIZE
 	clipped_lo = np.clip(lo, 0, shape_xyz)
@@ -154,12 +154,11 @@ def read_brick(volume, shape_xyz, chunk_xyz, level=0):
 	if np.any(clipped_hi <= clipped_lo):
 		return EMPTY_BRICK
 
-	# The volume is indexed (Z, Y, X, level).
-	data = volume[
+	# The zarr arrays are indexed (Z, Y, X).
+	data = array[
 		clipped_lo[2]:clipped_hi[2],
 		clipped_lo[1]:clipped_hi[1],
 		clipped_lo[0]:clipped_hi[0],
-		level,
 	]
 	if not np.any(data):
 		return EMPTY_BRICK
@@ -177,11 +176,10 @@ def read_brick(volume, shape_xyz, chunk_xyz, level=0):
 class BrickLoader:
 	"""Reads bricks off disk on worker threads, never blocking the UI thread."""
 
-	def __init__(self, shapes_xyz):
-		self.shapes_xyz = {
-			int(level): np.asarray(shape, dtype=np.int64)
-			for level, shape in shapes_xyz.items()
-		}
+	def __init__(self, volume):
+		# The pyramid's zarr arrays, indexed by level. Reads are thread safe, so
+		# every worker shares them.
+		self.volume = volume
 		self.done = queue.Queue()
 		self.executor = ThreadPoolExecutor(
 			max_workers=LOADER_THREADS, thread_name_prefix="velend-brick"
@@ -190,16 +188,6 @@ class BrickLoader:
 		# key -> Future, so a stale request can still be cancelled while it's
 		# only sitting in the executor's queue rather than actually reading.
 		self.inflight = {}
-		# `vesuvius.Volume` makes no threadsafety promise, so each worker gets
-		# its own handle rather than sharing the one in `state`.
-		self.local = threading.local()
-
-	def volume(self):
-		volume = getattr(self.local, "volume", None)
-		if volume is None:
-			volume = state.new_volume()
-			self.local.volume = volume
-		return volume
 
 	def request(self, level, key, chunk_xyz):
 		request_key = (int(level), int(key))
@@ -229,9 +217,7 @@ class BrickLoader:
 	def _load(self, request_key, chunk_xyz):
 		level, _ = request_key
 		try:
-			brick = read_brick(
-				self.volume(), self.shapes_xyz[level], chunk_xyz, level=level
-			)
+			brick = read_brick(self.volume[level], chunk_xyz)
 		except Exception as error:
 			print("velend: L%d brick load failed at" % level, chunk_xyz, error)
 			brick = None

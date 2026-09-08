@@ -1,14 +1,10 @@
 import bpy
 import importlib
-import sys
 
-# NOTE: On my machine that's where blender's python puts packages if I
-# `blender_python -m pip install` them, so that's how I installed vesuvius, and how I accepted the
-# terms. Extensions don't have it in the path (surely) because they want you to make and distribute
-# wheels. TODO: Do that instead, and figure out where the terms file ends up, or it fails silently.
-sys.path.append("/Users/spelufo/.local/lib/python3.13/site-packages")
-sys.path.append("/Users/spelufo/pro/vesuvius/villa/vesuvius/src")
-
+# zarr and its dependencies come from the wheels in `wheels/`, which Blender
+# unpacks and puts on the path itself, in a development checkout as much as in
+# an installed extension. `scripts/develop.py` and `scripts/build.py` fill that
+# directory and list its contents in the manifest.
 
 from . import bricks
 from . import atlas
