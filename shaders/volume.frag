@@ -3,46 +3,140 @@
 #define NORMAL_SAMPLES 5
 const float SAMPLE_DELTA = 1.0f;
 
-float sampleVolume(vec3 coord) {
-  // Try the full-resolution atlas first. Page-table value 0 means that the
-  // chunk is not resident; other values are atlas slot + 1.
+bool sampleL0(vec3 coord, out float value) {
   ivec3 chunk = ivec3(floor(coord / float(BRICK_CORE)));
-  int slot = -1;
-  if (all(greaterThanEqual(chunk, ivec3(0))) && all(lessThan(chunk, L0_PAGE_DIMS))) {
-    slot = int(texelFetch(l0PageTable, chunk, 0).r + 0.5f) - 1;
+  if (any(lessThan(chunk, ivec3(0))) || any(greaterThanEqual(chunk, L0_PAGE_DIMS))) {
+    return false;
   }
+  int slot = int(texelFetch(l0PageTable, chunk, 0).r + 0.5f) - 1;
+  if (slot < 0) {
+    return false;
+  }
+  ivec3 slotCoord = ivec3(
+    slot % L0_SLOTS_PER_AXIS,
+    (slot / L0_SLOTS_PER_AXIS) % L0_SLOTS_PER_AXIS,
+    slot / (L0_SLOTS_PER_AXIS * L0_SLOTS_PER_AXIS));
+  vec3 local = clamp(coord - vec3(chunk) * float(BRICK_CORE), 0.0f, float(BRICK_CORE));
+  vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local;
+  value = texture(l0Atlas, texel / float(L0_ATLAS_DIM)).r;
+  return true;
+}
 
-  if (slot >= 0) {
-    ivec3 slotCoord = ivec3(
-      slot % L0_SLOTS_PER_AXIS,
-      (slot / L0_SLOTS_PER_AXIS) % L0_SLOTS_PER_AXIS,
-      slot / (L0_SLOTS_PER_AXIS * L0_SLOTS_PER_AXIS));
-    // Texel `BRICK_PAD` of a brick is the first voxel of its core, so a sample
-    // on a core face lands exactly between the same two voxels whichever of the
-    // two neighbouring bricks it is taken from. That is what hides the seams.
-    vec3 local = clamp(coord - vec3(chunk) * float(BRICK_CORE), 0.0f, float(BRICK_CORE));
-    vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local;
-    return texture(l0Atlas, texel / float(L0_ATLAS_DIM)).r;
+#if LEVEL_CAP >= 1
+bool sampleL1(vec3 coord, out float value) {
+  coord *= 0.5f;
+  ivec3 chunk = ivec3(floor(coord / float(BRICK_CORE)));
+  if (any(lessThan(chunk, ivec3(0))) || any(greaterThanEqual(chunk, L1_PAGE_DIMS))) {
+    return false;
   }
+  int slot = int(texelFetch(l1PageTable, chunk, 0).r + 0.5f) - 1;
+  if (slot < 0) {
+    return false;
+  }
+  ivec3 slotCoord = ivec3(
+    slot % L1_SLOTS_PER_AXIS,
+    (slot / L1_SLOTS_PER_AXIS) % L1_SLOTS_PER_AXIS,
+    slot / (L1_SLOTS_PER_AXIS * L1_SLOTS_PER_AXIS));
+  vec3 local = clamp(coord - vec3(chunk) * float(BRICK_CORE), 0.0f, float(BRICK_CORE));
+  vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local;
+  value = texture(l1Atlas, texel / float(L1_ATLAS_DIM)).r;
+  return true;
+}
+#endif
 
-  // L1 has the same brick geometry in its own voxel space, with each voxel
-  // spanning two L0 voxels on every axis.
-  vec3 l1Coord = coord * 0.5f;
-  chunk = ivec3(floor(l1Coord / float(BRICK_CORE)));
-  slot = -1;
-  if (all(greaterThanEqual(chunk, ivec3(0))) && all(lessThan(chunk, L1_PAGE_DIMS))) {
-    slot = int(texelFetch(l1PageTable, chunk, 0).r + 0.5f) - 1;
+#if LEVEL_CAP >= 2
+bool sampleL2(vec3 coord, out float value) {
+  coord *= 0.25f;
+  ivec3 chunk = ivec3(floor(coord / float(BRICK_CORE)));
+  if (any(lessThan(chunk, ivec3(0))) || any(greaterThanEqual(chunk, L2_PAGE_DIMS))) {
+    return false;
   }
+  int slot = int(texelFetch(l2PageTable, chunk, 0).r + 0.5f) - 1;
+  if (slot < 0) {
+    return false;
+  }
+  ivec3 slotCoord = ivec3(
+    slot % L2_SLOTS_PER_AXIS,
+    (slot / L2_SLOTS_PER_AXIS) % L2_SLOTS_PER_AXIS,
+    slot / (L2_SLOTS_PER_AXIS * L2_SLOTS_PER_AXIS));
+  vec3 local = clamp(coord - vec3(chunk) * float(BRICK_CORE), 0.0f, float(BRICK_CORE));
+  vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local;
+  value = texture(l2Atlas, texel / float(L2_ATLAS_DIM)).r;
+  return true;
+}
+#endif
 
-  if (slot >= 0) {
-    ivec3 slotCoord = ivec3(
-      slot % L1_SLOTS_PER_AXIS,
-      (slot / L1_SLOTS_PER_AXIS) % L1_SLOTS_PER_AXIS,
-      slot / (L1_SLOTS_PER_AXIS * L1_SLOTS_PER_AXIS));
-    vec3 local = clamp(l1Coord - vec3(chunk) * float(BRICK_CORE), 0.0f, float(BRICK_CORE));
-    vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local;
-    return texture(l1Atlas, texel / float(L1_ATLAS_DIM)).r;
+#if LEVEL_CAP >= 3
+bool sampleL3(vec3 coord, out float value) {
+  coord *= 0.125f;
+  ivec3 chunk = ivec3(floor(coord / float(BRICK_CORE)));
+  if (any(lessThan(chunk, ivec3(0))) || any(greaterThanEqual(chunk, L3_PAGE_DIMS))) {
+    return false;
   }
+  int slot = int(texelFetch(l3PageTable, chunk, 0).r + 0.5f) - 1;
+  if (slot < 0) {
+    return false;
+  }
+  ivec3 slotCoord = ivec3(
+    slot % L3_SLOTS_PER_AXIS,
+    (slot / L3_SLOTS_PER_AXIS) % L3_SLOTS_PER_AXIS,
+    slot / (L3_SLOTS_PER_AXIS * L3_SLOTS_PER_AXIS));
+  vec3 local = clamp(coord - vec3(chunk) * float(BRICK_CORE), 0.0f, float(BRICK_CORE));
+  vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local;
+  value = texture(l3Atlas, texel / float(L3_ATLAS_DIM)).r;
+  return true;
+}
+#endif
+
+#if LEVEL_CAP >= 4
+bool sampleL4(vec3 coord, out float value) {
+  coord *= 0.0625f;
+  ivec3 chunk = ivec3(floor(coord / float(BRICK_CORE)));
+  if (any(lessThan(chunk, ivec3(0))) || any(greaterThanEqual(chunk, L4_PAGE_DIMS))) {
+    return false;
+  }
+  int slot = int(texelFetch(l4PageTable, chunk, 0).r + 0.5f) - 1;
+  if (slot < 0) {
+    return false;
+  }
+  ivec3 slotCoord = ivec3(
+    slot % L4_SLOTS_PER_AXIS,
+    (slot / L4_SLOTS_PER_AXIS) % L4_SLOTS_PER_AXIS,
+    slot / (L4_SLOTS_PER_AXIS * L4_SLOTS_PER_AXIS));
+  vec3 local = clamp(coord - vec3(chunk) * float(BRICK_CORE), 0.0f, float(BRICK_CORE));
+  vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local;
+  value = texture(l4Atlas, texel / float(L4_ATLAS_DIM)).r;
+  return true;
+}
+#endif
+
+float sampleVolume(vec3 coord) {
+  // Try streamed levels from finest to coarsest. Inactive levels and their
+  // sampler accesses are removed by the preprocessor before compilation.
+  float value;
+  if (sampleL0(coord, value)) {
+    return value;
+  }
+#if LEVEL_CAP >= 1
+  if (sampleL1(coord, value)) {
+    return value;
+  }
+#endif
+#if LEVEL_CAP >= 2
+  if (sampleL2(coord, value)) {
+    return value;
+  }
+#endif
+#if LEVEL_CAP >= 3
+  if (sampleL3(coord, value)) {
+    return value;
+  }
+#endif
+#if LEVEL_CAP >= 4
+  if (sampleL4(coord, value)) {
+    return value;
+  }
+#endif
   return texture(volume, coord / volumeUniforms.loresExtent).r;
 }
 
