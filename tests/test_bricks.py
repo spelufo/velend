@@ -37,6 +37,17 @@ class FakeArray:
 		return np.full(shape, self.fill, dtype=np.uint8)
 
 
+class VoxelArray:
+	"""Stands in for a level whose voxels are not all the same."""
+
+	def __init__(self, voxels_zyx):
+		self.voxels = voxels_zyx
+		self.shape = voxels_zyx.shape
+
+	def __getitem__(self, index):
+		return self.voxels[index]
+
+
 class BrickTests(unittest.TestCase):
 	def test_read_brick_clips_to_the_array_and_pads_the_boundary(self):
 		array = FakeArray((4, 5, 6))
@@ -52,6 +63,24 @@ class BrickTests(unittest.TestCase):
 	def test_fully_black_read_is_reported_as_empty(self):
 		brick = bricks.read_brick(FakeArray((4, 5, 6), fill=0), (0, 0, 0))
 		self.assertIs(brick, bricks.EMPTY_BRICK)
+
+	def test_black_core_is_empty_even_when_a_neighbour_holds_data(self):
+		# A chunk absent from a sparse mirror, sitting right next to one that
+		# was downloaded: only the padding sees the neighbour's voxels, and
+		# uploading it would hide the coarser levels behind a black brick.
+		core = bricks.BRICK_CORE
+		voxels = np.zeros((core, core, 2 * core), dtype=np.uint8)
+		voxels[:, :, :core] = 255
+		brick = bricks.read_brick(VoxelArray(voxels), (1, 0, 0))
+		self.assertIs(brick, bricks.EMPTY_BRICK)
+
+	def test_a_single_lit_core_voxel_still_loads(self):
+		core = bricks.BRICK_CORE
+		voxels = np.zeros((core, core, 2 * core), dtype=np.uint8)
+		voxels[0, 0, core] = 255
+		brick = bricks.read_brick(VoxelArray(voxels), (1, 0, 0))
+		self.assertIsNot(brick, bricks.EMPTY_BRICK)
+		self.assertEqual(float(brick[bricks.BRICK_PAD, bricks.BRICK_PAD, bricks.BRICK_PAD]), 1.0)
 
 	def test_coarser_levels_are_empty_until_finer_capacity_is_exceeded(self):
 		chunks = np.stack(

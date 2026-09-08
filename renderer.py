@@ -33,6 +33,15 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	shader_mtimes = None
 	uniform_buffer = None
 
+	# Why the scene's volume could not be opened, shown by the scene panel, or
+	# None when it is open. `failed_path` keeps a bad path from being retried on
+	# every single draw.
+	volume_error = "No volume set"
+	failed_path = None
+	# Set when the scene's volume changes. The teardown frees GPU textures, so
+	# it waits for `view_draw`, where a GPU context is active.
+	pending_reset = False
+
 	# Level 0 voxels per Blender unit, and the extent in level 0 voxels that the
 	# low resolution texture spans. Both are set up by `ensure_grid`.
 	voxels_per_unit = 1.0
@@ -74,6 +83,110 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	live_instances = weakref.WeakSet()
 
 	@classmethod
+	def settings(cls):
+		return bpy.context.scene.velend
+
+	@classmethod
+	def volume_path(cls):
+		"""The configured volume directory, resolved against the .blend."""
+		path = cls.settings().volume_path.strip()
+		if not path:
+			return ""
+		# The file browser always hands back an absolute path; expanding covers
+		# the paths typed into the field by hand.
+		return os.path.expanduser(bpy.path.abspath(path))
+
+	@classmethod
+	def get_volume(cls):
+		"""The scene's pyramid, or None with the reason left in `volume_error`."""
+		path = cls.volume_path()
+		if not path:
+			cls.volume_error = "No volume set"
+			return None
+		if path == cls.failed_path:
+			return None
+		try:
+			volume = state.get_volume(path)
+		except Exception as error:
+			# Remembered rather than retried: this runs on every draw.
+			cls.failed_path = path
+			cls.volume_error = "Cannot open volume: %s" % error
+			print("velend:", cls.volume_error)
+			return None
+		if len(volume) <= bricks.FALLBACK_LEVEL:
+			# The coarsest level is the whole-volume fallback texture, and every
+			# finer one is streamed, so a shallower pyramid has nothing to fall
+			# back on.
+			cls.failed_path = path
+			cls.volume_error = "Volume has %d pyramid levels, %d are needed" % (
+				len(volume), bricks.FALLBACK_LEVEL + 1
+			)
+			print("velend:", cls.volume_error)
+			return None
+		cls.volume_error = None
+		return volume
+
+	@classmethod
+	def compute_voxels_per_unit(cls):
+		"""Level 0 voxels per Blender unit, from the scene's voxel size."""
+		scene = bpy.context.scene
+		# Full-res voxels are `resolution` µm across.
+		return (1000000.0 * scene.unit_settings.scale_length) / scene.velend.resolution
+
+	@classmethod
+	def status(cls):
+		"""A (message, icon) pair describing what is loaded, for the UI."""
+		if not cls.settings().volume_path.strip():
+			return "No volume set", 'INFO'
+		if cls.volume_error:
+			return cls.volume_error, 'ERROR'
+		if cls.shape_xyz is None or cls.pending_reset:
+			return "Not loaded yet", 'INFO'
+		return "%d x %d x %d voxels" % cls.shape_xyz, 'CHECKMARK'
+
+	@classmethod
+	def reset(cls):
+		"""Ask for everything derived from the volume to be rebuilt."""
+		cls.pending_reset = True
+		# Cleared here rather than in the deferred teardown so that the panel
+		# stops reporting the previous volume's trouble straight away.
+		cls.failed_path = None
+		cls.volume_error = None
+		cls.request_redraw()
+
+	@classmethod
+	def apply_reset(cls):
+		"""Drop it all, so the rest of this draw rebuilds it. Needs a GPU context."""
+		cls.pending_reset = False
+		if cls.loader is not None:
+			cls.loader.shutdown()
+			cls.loader = None
+		cls.volume = None
+		cls.atlases = {}
+		cls.residencies = {}
+		cls.shapes_xyz = {}
+		cls.shape_xyz = None
+		cls.wanted = {level: frozenset() for level in bricks.ACTIVE_LEVELS}
+		cls.pending_levels = {}
+		cls.empty_chunks = {level: set() for level in bricks.ACTIVE_LEVELS}
+		cls.fallback_keys = {level: set() for level in bricks.ACTIVE_LEVELS}
+		cls.last_focus_voxel = np.zeros(3, dtype=np.float64)
+		cls.last_cursor = None
+		# The page table dimensions are baked into the fragment shader, so a
+		# volume of a different size needs the shader compiled again.
+		cls.shader = None
+		cls.shader_mtimes = None
+		cls.batches.clear()
+
+	@classmethod
+	def rescale(cls):
+		"""Reapply the voxel size to the grid already built, without rebuilding it."""
+		if not cls.residencies or cls.pending_reset:
+			return
+		cls.voxels_per_unit = cls.compute_voxels_per_unit()
+		cls.retarget(bpy.context.evaluated_depsgraph_get(), bpy.context.scene.cursor.location)
+
+	@classmethod
 	def shader_file_mtimes(cls):
 		return (
 			os.stat(_VERT_SHADER_PATH).st_mtime_ns,
@@ -102,15 +215,15 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		if cls.residencies:
 			return
 
-		volume = state.get_volume()
+		volume = cls.get_volume()
+		if volume is None:
+			return
 		cls.shapes_xyz = {
 			level: tuple(int(s) for s in reversed(volume[level].shape))
 			for level in bricks.ACTIVE_LEVELS
 		}
 		cls.shape_xyz = cls.shapes_xyz[0]
-		unit_scale = bpy.context.scene.unit_settings.scale_length
-		# Full-res voxels are `state.resolution` µm across.
-		cls.voxels_per_unit = (1000000.0 * unit_scale) / state.resolution
+		cls.voxels_per_unit = cls.compute_voxels_per_unit()
 		cls.residencies = {
 			level: bricks.Residency(
 				bricks.grid_dims(cls.shapes_xyz[level]), bricks.SLOT_COUNTS[level]
@@ -134,7 +247,9 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		if cls.volume is not None:
 			return
 
-		volume = state.get_volume()
+		volume = cls.get_volume()
+		if volume is None:
+			return
 		lores = np.ascontiguousarray(
 			volume[bricks.FALLBACK_LEVEL][:], dtype=np.float32
 		)
@@ -156,6 +271,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	@classmethod
 	def ensure_atlases(cls):
+		if not cls.residencies:
+			return
 		for level in bricks.ACTIVE_LEVELS:
 			if level in cls.atlases:
 				continue
@@ -169,6 +286,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	@classmethod
 	def ensure_shader(cls):
+		if not cls.residencies:
+			return
 		if cls.shader is not None and not cls.shaders_changed():
 			return
 
@@ -315,8 +434,12 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		only decides what the working set should be and queues the reads.
 		`pump_uploads` moves the results onto the GPU on the following draws.
 		"""
+		if cls.pending_reset:
+			return 0
 		cls.last_cursor = tuple(focus)
 		cls.ensure_grid()
+		if not cls.residencies:
+			return 0
 		l0_residency = cls.residencies[0]
 		dims = np.asarray(l0_residency.dims, dtype=np.int64)
 		focus_voxel = np.asarray(focus, dtype=np.float64) * cls.voxels_per_unit
@@ -539,6 +662,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	def view_draw(self, context, depsgraph):
 		self.live_instances.add(self)
+		if self.pending_reset:
+			self.apply_reset()
 		first_init = not self.residencies
 		self.ensure_gpu_resources()
 		if first_init and self.residencies:
@@ -611,8 +736,17 @@ def _watch_cursor():
 	return _CURSOR_WATCH_INTERVAL
 
 
+@bpy.app.handlers.persistent
+def _load_post(_file_path):
+	# The engine's state is class level, so it outlives the file it was built
+	# for; the new file may well name a different volume.
+	VolumeSamplerRenderEngine.reset()
+
+
 def register():
 	bpy.utils.register_class(VolumeSamplerRenderEngine)
+	if _load_post not in bpy.app.handlers.load_post:
+		bpy.app.handlers.load_post.append(_load_post)
 	if not bpy.app.timers.is_registered(_watch_shader_files):
 		bpy.app.timers.register(_watch_shader_files, persistent=True)
 	if not bpy.app.timers.is_registered(_watch_streaming):
@@ -622,6 +756,8 @@ def register():
 
 
 def unregister():
+	if _load_post in bpy.app.handlers.load_post:
+		bpy.app.handlers.load_post.remove(_load_post)
 	if bpy.app.timers.is_registered(_watch_cursor):
 		bpy.app.timers.unregister(_watch_cursor)
 	if bpy.app.timers.is_registered(_watch_streaming):

@@ -17,26 +17,31 @@ Download the zip for your platform from the
 
 ### Setup
 
-TODO: Make this easy, not my custom setup.
-- hardcoded zar path goes away
-- user picks .volpkg.json and there's ui to pick a volume, or sth
-- autodownload? it will read whatever you have in the volume
-- Blender files must have:
-  - Unit: mm
-  - Unit scale: 0.001
-  - Renderer: Volume Sampler
-- TODO: Init some axis planes when choosing a scan
+NOTE: For the moment velend won't download volume chunks on the fly like VC3D.
+It will render with whatever chunks are present in the zarr. If you've opened a volume in
+VC3D before, then your omezar will at least have the L5 most downsampled data.
+Use something like [vc_zarr_download_region](https://github.com/ScrollPrize/villa/pull/1707)
+to download a region of an omezar at all levels of detail.
 
+Point the extension at a scan in the Properties editor, under Scene > Velend:
 
-### Recommended blender preferences and key mapping
+- Volume: the OME-Zarr directory of the scan.
+- Voxel Size: how wide a full resolution voxel is, in micrometers. It is filled
+  in from the volume's directory name when that names it, as in
+  `20250820131727-9.362um-1.2m-113keV-masked.zarr`.
 
-Choose "Use spacebar to search commands".
+Then hit "Setup Scene for Volume", which sets the rest up:
+- Scene > Units > Unit: mm
+- Scene > Units > Unit scale: 0.001
+- Render > Render Engine: Volume Sampler
+- Viewport Shading: Rendered
+- Viewport Overlays > Grid > Scale: 0.001
 
-Navigation changes:
-- Turn on "Use the depth under the mouse to improve orbit/rotate".
-- alt + left click -> orbit (view.rotate3d)
-- alt + right click -> pan
-- scroll wheel -> zoom
+It also adds a plane per axis through the middle of the volume, and puts the 3D
+cursor there, which is where bricks stream in around.
+
+Hit "space" to search for commands and search for "Frame selected".
+Hit "z" and choose "Rendered" to show the scroll scan on the cutting planes.
 
 
 ### Blender crash course
@@ -51,6 +56,15 @@ Navigation changes:
 - `shift + x/y/z` to constraint to the other two axis
 - `shift + d` to duplicate an object
 - `n` to see panel with object coordinates, etc
+
+
+### Recommended preferences
+
+- Choose "Use spacebar to search commands".
+- Turn on "Use the depth under the mouse to improve orbit/rotate".
+- `alt + lmb` -> view.rotate3d (default is middle mouse press which destroys mouses)
+- `alt + rmb` -> pan
+- `scroll wheel` -> zoom
 
 
 ## Development

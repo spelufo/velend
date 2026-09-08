@@ -150,7 +150,7 @@ void main() {
 
   float raw = 0.0f;
   for (int i = 0; i < NORMAL_SAMPLES; i++) {
-    float offset = (float(i) - float(NORMAL_SAMPLES - 1) * 0.0f) * SAMPLE_DELTA;
+    float offset = (float(i) - float(NORMAL_SAMPLES - 1) * 0.5f) * SAMPLE_DELTA;
     raw += sampleVolume(voxelCoord + normal * offset);
   }
   raw /= float(NORMAL_SAMPLES);

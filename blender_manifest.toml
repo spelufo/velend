@@ -13,7 +13,7 @@ website = "https://scrollprize.org/"
 # # https://docs.blender.org/manual/en/latest/advanced/extensions/tags.html
 # tags = ["Animation", "Sequencer"]
 
-blender_version_min = "5.1.2"
+blender_version_min = "5.1.0"
 
 # License conforming to https://spdx.org/licenses/ (use "SPDX: prefix)
 # https://docs.blender.org/manual/en/latest/advanced/extensions/licenses.html
@@ -69,9 +69,7 @@ wheels = [
 # For longer explanations use the documentation or detail page.
 
 [permissions]
-network = "Download"
-files = "Load/save"
-clipboard = "Copy/paste"
+files = "Read the OME-Zarr volume to render"
 
 # Advanced build settings.
 # https://docs.blender.org/manual/en/latest/advanced/command_line/extension_arguments.html#command-line-args-extension-build

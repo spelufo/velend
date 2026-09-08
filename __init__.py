@@ -10,12 +10,14 @@ from . import bricks
 from . import atlas
 from . import renderer
 from . import commands
+from . import ui
 
 _modules = [
 	bricks,
 	atlas,
 	renderer,
 	commands,
+	ui,
 ]
 
 _reload = "_loaded" in locals()

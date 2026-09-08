@@ -140,11 +140,17 @@ def select_lod_chunks(chunks, level_dims, focus_voxel, slot_counts=None):
 
 
 def read_brick(array, chunk_xyz):
-	"""Read one padded brick, or return EMPTY_BRICK when every voxel is zero.
+	"""Read one padded brick, or return EMPTY_BRICK when its core is all zero.
 
 	`array` is the zarr array of the level being loaded. The brick is returned
 	in numpy (Z, Y, X) order, ready for a GPUTexture staging buffer. Padding
 	that falls outside the volume is left at zero.
+
+	Only the core decides emptiness. The padding is a copy of the neighbouring
+	chunks, carried for the sake of seamless filtering, so judging the whole
+	read would keep a black chunk that merely touches one holding data: it
+	would take an atlas slot and paint a black brick over what the coarser
+	levels have, which is exactly where a hole appears.
 	"""
 	shape_xyz = np.asarray(array.shape[::-1], dtype=np.int64)
 	lo = np.asarray(chunk_xyz, dtype=np.int64) * BRICK_CORE - BRICK_PAD
@@ -160,7 +166,14 @@ def read_brick(array, chunk_xyz):
 		clipped_lo[1]:clipped_hi[1],
 		clipped_lo[0]:clipped_hi[0],
 	]
-	if not np.any(data):
+	core_lo = np.clip(lo + BRICK_PAD, 0, shape_xyz) - clipped_lo
+	core_hi = np.clip(hi - BRICK_PAD, 0, shape_xyz) - clipped_lo
+	core = data[
+		core_lo[2]:core_hi[2],
+		core_lo[1]:core_hi[1],
+		core_lo[0]:core_hi[0],
+	]
+	if not np.any(core):
 		return EMPTY_BRICK
 	brick = np.zeros((BRICK_SIZE, BRICK_SIZE, BRICK_SIZE), dtype=np.float32)
 	off = clipped_lo - lo
