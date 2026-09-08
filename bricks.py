@@ -184,7 +184,7 @@ class BrickLoader:
 		}
 		self.done = queue.Queue()
 		self.executor = ThreadPoolExecutor(
-			max_workers=LOADER_THREADS, thread_name_prefix="vlend-brick"
+			max_workers=LOADER_THREADS, thread_name_prefix="velend-brick"
 		)
 		self.lock = threading.Lock()
 		# key -> Future, so a stale request can still be cancelled while it's
@@ -233,7 +233,7 @@ class BrickLoader:
 				self.volume(), self.shapes_xyz[level], chunk_xyz, level=level
 			)
 		except Exception as error:
-			print("vlend: L%d brick load failed at" % level, chunk_xyz, error)
+			print("velend: L%d brick load failed at" % level, chunk_xyz, error)
 			brick = None
 		self.done.put((request_key, brick))
 

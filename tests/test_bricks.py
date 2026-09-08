@@ -8,7 +8,7 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = "vlend_test"
+PACKAGE = "velend_test"
 package = types.ModuleType(PACKAGE)
 package.__path__ = [str(ROOT)]
 sys.modules.setdefault(PACKAGE, package)

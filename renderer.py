@@ -122,7 +122,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.fallback_keys = {level: set() for level in bricks.ACTIVE_LEVELS}
 		for level in bricks.ACTIVE_LEVELS:
 			print(
-				"vlend: L%d chunk grid" % level,
+				"velend: L%d chunk grid" % level,
 				cls.residencies[level].dims,
 				"over",
 				cls.shapes_xyz[level],
@@ -283,6 +283,20 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.meshes[name] = arrays
 		return arrays
 
+	@staticmethod
+	def instance_visible(instance, depsgraph, viewport=None):
+		"""Effective viewport visibility, including the owning collection."""
+		if not instance.show_self:
+			return False
+		if instance.is_instance:
+			# Dupli visibility is computed per generated instance by the
+			# depsgraph; its source object need not belong to the view layer.
+			return True
+		return instance.object.original.visible_get(
+			view_layer=depsgraph.view_layer,
+			viewport=viewport,
+		)
+
 	@classmethod
 	def batch_from_object(cls, obj_eval):
 		from gpu_extras.batch import batch_for_shader
@@ -319,6 +333,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 		found = []
 		for instance in depsgraph.object_instances:
+			# The iterator can retain hidden instancers and objects whose layer
+			# collection is disabled, so apply effective visibility explicitly.
+			if not cls.instance_visible(instance, depsgraph):
+				continue
 			obj = instance.object
 			if obj.type != 'MESH':
 				continue
@@ -494,9 +512,16 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		self.live_instances.add(self)
 		geometry_changed = False
 		transform_changed = False
+		visibility_changed = False
 		for update in depsgraph.updates:
-			geometry_changed |= update.is_updated_geometry
-			transform_changed |= update.is_updated_transform
+			geometry = update.is_updated_geometry
+			transform = update.is_updated_transform
+			shading = update.is_updated_shading
+			geometry_changed |= geometry
+			transform_changed |= transform
+			# Blender exposes no dedicated visibility flag. Hide/show arrives as
+			# an otherwise-unclassified depsgraph update.
+			visibility_changed |= not (geometry or transform or shading)
 
 		if geometry_changed:
 			# Batches hold local-space positions only, so a transform-only change
@@ -505,7 +530,9 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			self.batches.clear()
 			self.meshes.clear()
 
-		if (geometry_changed or transform_changed) and self.residencies:
+		if (geometry_changed or transform_changed or visibility_changed) and self.residencies:
+			# Hide/show changes have neither the geometry nor transform flag, but
+			# they change both what is drawn and which bricks are wanted.
 			# Retargeting depends on world-space triangle positions, which a
 			# transform change moves just as much as an edit to the mesh itself.
 			self.retarget(depsgraph, context.scene.cursor.location)
@@ -539,6 +566,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		# Iterating the instances also draws the duplis and the geometry nodes instances,
 		# which share the batch of the object they instance.
 		for instance in depsgraph.object_instances:
+			if not self.instance_visible(instance, depsgraph, context.space_data):
+				continue
 			obj = instance.object
 			if obj.type != 'MESH':
 				continue

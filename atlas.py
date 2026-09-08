@@ -5,9 +5,9 @@ Everything here needs an active GPU context, so it may only be touched from
 
 Two textures back each streamed level:
 
-	  atlas      a big R8 3D texture holding padded bricks.
-  pageTable  one R32F texel per chunk of the whole volume, holding `slot + 1`
-	             of the brick that chunk lives in, or 0 when it is not resident.
+	atlas      a big R8 3D texture holding padded bricks.
+	pageTable  one R32F texel per chunk of the whole volume, holding `slot + 1`
+	           of the brick that chunk lives in, or 0 when it is not resident.
 
 Blender's `GPUTexture` has no sub-region upload, so bricks reach the atlas by
 way of a small staging texture and a compute shader that copies it into place.
@@ -70,7 +70,7 @@ class BrickAtlas:
 		try:
 			mtime = os.stat(COPY_SHADER_PATH).st_mtime_ns
 		except OSError as error:
-			print("vlend: cannot stat brick copy shader:", error)
+			print("velend: cannot stat brick copy shader:", error)
 			return self.copy_shader
 		if self.copy_shader is not None and mtime == self.copy_mtime:
 			return self.copy_shader
@@ -91,9 +91,9 @@ class BrickAtlas:
 			info.compute_source(source)
 			self.copy_shader = gpu.shader.create_from_info(info)
 			self.copy_failed = False
-			print("vlend: loaded brick copy shader")
+			print("velend: loaded brick copy shader")
 		except Exception as error:
-			print("vlend: brick copy shader failed:", error)
+			print("velend: brick copy shader failed:", error)
 			self.copy_shader = None
 			self.copy_failed = True
 		return self.copy_shader

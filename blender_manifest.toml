@@ -1,8 +1,8 @@
 schema_version = "1.0.0"
 
-id = "vlend"
+id = "velend"
 version = "0.1.0"
-name = "Vlend"
+name = "velend"
 tagline = "Explore the X-ray scans from the Vesuvius Challenge"
 maintainer = "Santiago Pelufo"
 type = "add-on"
