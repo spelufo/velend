@@ -227,6 +227,7 @@ class SCENE_PT_velend(bpy.types.Panel):
 		column.prop(settings, "resolution")
 
 		layout.operator("velend.setup_scene", icon='SCENE_DATA')
+		layout.operator("velend.import_tifxyz", icon='IMPORT')
 
 		status, icon = VolumeSamplerRenderEngine.status()
 		layout.label(text=status, icon=icon)

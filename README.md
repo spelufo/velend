@@ -44,6 +44,21 @@ Hit "space" to search for commands and search for "Frame selected".
 Hit "z" and choose "Rendered" to show the scroll scan on the cutting planes.
 
 
+### Segments
+
+File > Import > Volume Cartographer Surface (tifxyz) brings a segmentation in
+as a mesh. Point it at a surface directory, the one holding `x.tif`, `y.tif`,
+`z.tif` and `meta.json`, or at a folder of them such as VC3D's `patches/`, and
+every surface under it comes in at once.
+
+The surface's grid becomes a quad per cell, minus the cells its `mask.tif`
+takes out, with a UV map over the grid and any extra channel like
+`generations.tif` as a mesh attribute. Raise "Step" to bring a large segment in
+coarser, one grid point in every n. "Voxel Size" says what the surface's
+coordinates are in, and starts from the scene's own, so a segment lands inside
+the volume it was traced from and "Load High-Res Volume" renders the scan on it.
+
+
 ### Blender crash course
 
 - `shift + rmb` to place the 3d cursor

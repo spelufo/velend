@@ -10,6 +10,7 @@ from . import metadata
 from . import bricks
 from . import atlas
 from . import renderer
+from . import tifxyz
 from . import commands
 from . import ui
 
@@ -17,6 +18,7 @@ _modules = [
 	bricks,
 	atlas,
 	renderer,
+	tifxyz,
 	commands,
 	ui,
 ]

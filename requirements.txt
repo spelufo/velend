@@ -1,8 +1,18 @@
-# The extension's only direct dependency. Everything else that ends up in
+# The extension's direct dependencies. Everything else that ends up in
 # `wheels/` is pulled in transitively.
 #
-# `scripts/develop.py` installs this into Blender's own Python.
-# `scripts/build.py` bundles it into the extension as wheels.
+# `scripts/develop.py` installs these into Blender's own Python.
+# `scripts/build.py` bundles them into the extension as wheels.
 #
 # Blender's Python already ships numpy, so that is never bundled.
 zarr>=2.18.7,<4
+
+# Reads the TIFFs of volume-cartographer's tifxyz surfaces.
+tifffile>=2024.1.30
+
+# The codecs tifffile hands the compressed TIFFs to. Only LZW is ever needed,
+# for the masks volume-cartographer writes and the coordinates villa's Python
+# writer does, but it is the only way to get it: without imagecodecs tifffile
+# reads uncompressed, deflate and packbits and nothing else. Its wheels are the
+# biggest thing the extension ships, ~13-28 MB depending on the platform.
+imagecodecs>=2024.1.1
