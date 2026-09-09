@@ -203,6 +203,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	@classmethod
 	def request_redraw(cls):
+		for window in bpy.context.window_manager.windows:
+			for area in window.screen.areas:
+				if area.type == 'IMAGE_EDITOR' and area.spaces.active.mode == 'UV':
+					area.tag_redraw()
 		for engine in list(cls.live_instances):
 			try:
 				engine.tag_redraw()
@@ -301,6 +305,20 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			print("Failed to read shaders:", error)
 			return
 
+		try:
+			shader = cls.create_shader(vert_source, frag_source)
+		except Exception as error:
+			print("Shader compile failed:", error)
+			cls.shader_mtimes = mtimes
+			return
+		cls.shader = shader
+		cls.shader_mtimes = mtimes
+		cls.batches.clear()
+		print("Loaded shaders")
+
+	@classmethod
+	def create_shader(cls, vert_source, frag_source, uv=False):
+		"""Share volume sampling between the 3D and UV projections."""
 		vert_out = gpu.types.GPUStageInterfaceInfo("volume_interface")
 		vert_out.smooth('VEC3', "voxelCoord")
 
@@ -340,26 +358,20 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 				2 + level * 2, 'FLOAT_3D', "l%dPageTable" % level
 			)
 		shader_info.vertex_in(0, 'VEC3', "position")
+		if uv:
+			shader_info.vertex_in(1, 'VEC2', "uv")
 		shader_info.vertex_out(vert_out)
 		shader_info.fragment_out(0, 'VEC4', "FragColor")
 		shader_info.vertex_source(vert_source)
 		shader_info.fragment_source(frag_source)
 
-		try:
-			shader = gpu.shader.create_from_info(shader_info)
-		except Exception as error:
-			print("Shader compile failed:", error)
-			cls.shader_mtimes = mtimes
-			return
-
-		cls.shader = shader
-		cls.shader_mtimes = mtimes
-		cls.batches.clear()
-		print("Loaded shaders")
+		return gpu.shader.create_from_info(shader_info)
 
 	@classmethod
 	def ensure_gpu_resources(cls):
 		cls.ensure_grid()
+		if not cls.residencies:
+			return
 		cls.ensure_volume()
 		cls.ensure_atlases()
 		cls.ensure_shader()

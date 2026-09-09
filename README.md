@@ -44,21 +44,6 @@ Hit "space" to search for commands and search for "Frame selected".
 Hit "z" and choose "Rendered" to show the scroll scan on the cutting planes.
 
 
-### Segments
-
-File > Import > Volume Cartographer Surface (tifxyz) brings a segmentation in
-as a mesh. Point it at a surface directory, the one holding `x.tif`, `y.tif`,
-`z.tif` and `meta.json`, or at a folder of them such as VC3D's `patches/`, and
-every surface under it comes in at once.
-
-The surface's grid becomes a quad per cell, minus the cells its `mask.tif`
-takes out, with a UV map over the grid and any extra channel like
-`generations.tif` as a mesh attribute. Raise "Step" to bring a large segment in
-coarser, one grid point in every n. "Voxel Size" says what the surface's
-coordinates are in, and starts from the scene's own, so a segment lands inside
-the volume it was traced from and "Load High-Res Volume" renders the scan on it.
-
-
 ### Blender crash course
 
 - `shift + rmb` to place the 3d cursor
@@ -80,6 +65,34 @@ the volume it was traced from and "Load High-Res Volume" renders the scan on it.
 - `alt + lmb` -> view.rotate3d (default is middle mouse press which destroys mouses)
 - `alt + rmb` -> pan
 - `scroll wheel` -> zoom
+
+
+### Segments
+
+File > Import > Volume Cartographer Surface (tifxyz) brings a segmentation in
+as a mesh. Point it at a surface directory, the one holding `x.tif`, `y.tif`,
+`z.tif` and `meta.json`, or at a folder of them such as VC3D's `patches/`, and
+every surface under it comes in at once.
+
+The surface's grid becomes a quad per cell, minus the cells its `mask.tif`
+takes out, with a UV map over the grid and any extra channel like
+`generations.tif` as a mesh attribute. Raise "Step" to bring a large segment in
+coarser, one grid point in every n. "Voxel Size" says what the surface's
+coordinates are in, and starts from the scene's own, so a segment lands inside
+the volume it was traced from and "Load High-Res Volume" renders the scan on it.
+
+
+### UV volume view
+
+The UV Editor renders the volume on the active mesh's active UV map, including
+live Edit Mode changes. Select an imported segment and open the UV Editor to
+see its flattened scan. The view shares the 3D renderer's volume textures:
+high-resolution detail still follows the 3D cursor, not UV panning or zooming.
+
+This currently uses the editable mesh, before modifiers. Overlapping UV faces
+overwrite one another. UV edges and vertices are depth-tested against the
+volume drawing; translucent face-selection and stretch overlays are not
+preserved by this drawing pass.
 
 
 ## Development
