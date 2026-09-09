@@ -6,6 +6,7 @@ import numpy as np
 
 from . import state
 from . import tifxyz
+from . import volpkg
 from .renderer import VolumeSamplerRenderEngine
 
 
@@ -43,6 +44,171 @@ class velend_OT_reload_volume(bpy.types.Operator):
 	def execute(self, context):
 		state.close_volume()
 		VolumeSamplerRenderEngine.reset()
+		return {'FINISHED'}
+
+
+# The volumes of every project file picked this session, keyed by the file and
+# the time it was written. The menu below asks for them on every redraw, which
+# is no reason to reread and reparse the project each time.
+_volpkg_volumes = {}
+
+# Blender does not copy the strings an enum callback returns, so the last list
+# has to outlive the call that handed it out. See `ui._items`.
+_enum_items = []
+
+
+def _volpkg_items(path):
+	"""The volumes of the project at `path`, parsed at most once per write."""
+	key = (path, os.path.getmtime(path))
+	volumes = _volpkg_volumes.get(key)
+	if volumes is None:
+		volumes = _volpkg_volumes[key] = volpkg.volumes(path)
+	return volumes
+
+
+def _volume_description(volume):
+	"""What the project says about one of its volumes, for the menu."""
+	parts = []
+	if volume.voxel_size_um:
+		parts.append("%g um voxels" % volume.voxel_size_um)
+	if volume.base_scale:
+		# The whole pyramid is read either way, so picking one of these is the
+		# same as picking the entry it selects a level of.
+		parts.append("entered at level %d" % volume.base_scale)
+	if volume.sample_id:
+		parts.append(volume.sample_id)
+	parts.extend(
+		tag for tag in volume.tags if not tag.startswith("vc-") and tag != "open-data"
+	)
+	if not volume.remote:
+		parts.append(volume.path if volume.cached else "missing: %s" % volume.path)
+	else:
+		parts.append("mirrored to disk" if volume.cached else "not downloaded yet")
+	return ", ".join(parts)
+
+
+def _volpkg_volume_items(self, context):
+	"""The picked project's volumes, as menu items keyed by their position in
+	the project's list: two entries can name the same volume at different
+	levels, so nothing else about them is unique."""
+	global _enum_items
+	try:
+		volumes = _volpkg_items(self.filepath)
+	except (OSError, ValueError, LookupError):
+		# `execute` reported it already; the dialog is just drawing.
+		volumes = []
+	_enum_items = [
+		(
+			str(index),
+			volume.name,
+			_volume_description(volume),
+			'DISK_DRIVE' if volume.cached else 'URL' if volume.remote else 'ERROR',
+			index,
+		)
+		for index, volume in enumerate(volumes)
+	]
+	return _enum_items
+
+
+class velend_OT_choose_volpkg(bpy.types.Operator):
+	bl_idname = "velend.choose_volpkg"
+	bl_label = "Choose from volpkg.json"
+	bl_description = (
+		"Point the scene at one of the volumes a VC3D project lists, through "
+		"the same cache directory VC3D reads it in"
+	)
+	bl_options = {'REGISTER'}
+
+	filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
+	filter_glob: bpy.props.StringProperty(
+		default="*.volpkg.json", options={'HIDDEN', 'SKIP_SAVE'}
+	)
+
+	def invoke(self, context, event):
+		# Where VC3D puts the open data projects it downloads. A project of
+		# one's own is as likely, so this only says where to start looking.
+		projects = volpkg.projects_dir()
+		if os.path.isdir(projects):
+			self.filepath = os.path.join(projects, "")
+		context.window_manager.fileselect_add(self)
+		return {'RUNNING_MODAL'}
+
+	def execute(self, context):
+		path = os.path.expanduser(bpy.path.abspath(self.filepath.strip()))
+		name = os.path.basename(path)
+		try:
+			volumes = _volpkg_items(path)
+		except (OSError, ValueError, LookupError) as error:
+			self.report({'ERROR'}, "Could not read %s: %s" % (name, error))
+			return {'CANCELLED'}
+		if not volumes:
+			self.report({'ERROR'}, "%s lists no volumes" % name)
+			return {'CANCELLED'}
+		# Which of them to use is asked in a dialog of its own: the file
+		# browser cannot show a menu of what is inside the file it browses for.
+		bpy.ops.velend.set_volpkg_volume('INVOKE_DEFAULT', filepath=path)
+		return {'FINISHED'}
+
+
+class velend_OT_set_volpkg_volume(bpy.types.Operator):
+	bl_idname = "velend.set_volpkg_volume"
+	bl_label = "Choose Volume"
+	bl_description = "Set the scene's volume to one of the ones a VC3D project lists"
+	bl_options = {'REGISTER', 'UNDO'}
+
+	filepath: bpy.props.StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
+	volume: bpy.props.EnumProperty(
+		name="Volume",
+		description="Which of the project's volumes to render",
+		items=_volpkg_volume_items,
+		options={'SKIP_SAVE'},
+	)
+
+	def invoke(self, context, event):
+		try:
+			volumes = _volpkg_items(self.filepath)
+		except (OSError, ValueError, LookupError) as error:
+			self.report({'ERROR'}, "Could not read the project: %s" % error)
+			return {'CANCELLED'}
+		if not volumes:
+			self.report({'ERROR'}, "No volumes to choose from")
+			return {'CANCELLED'}
+		# The scan's own reconstruction, over the predictions made from it, and
+		# one already downloaded over one that is not.
+		self.volume = str(max(
+			range(len(volumes)),
+			key=lambda index: (volumes[index].preferred, volumes[index].cached, -index),
+		))
+		return context.window_manager.invoke_props_dialog(self, width=500)
+
+	def draw(self, context):
+		layout = self.layout
+		layout.label(text=os.path.basename(self.filepath), icon='FILE_VOLUME')
+		layout.prop(self, "volume")
+
+	def execute(self, context):
+		try:
+			volume = _volpkg_items(self.filepath)[int(self.volume)]
+		except (OSError, ValueError, LookupError) as error:
+			self.report({'ERROR'}, "Could not read the project: %s" % error)
+			return {'CANCELLED'}
+
+		settings = context.scene.velend
+		# The URL first: setting either of the two reopens the volume, and
+		# doing it in this order means the reopen that sticks is the one with
+		# both of them in hand. The path assignment fills the voxel size in
+		# from the directory's name, which the project states outright.
+		settings.source_url = volume.url
+		settings.volume_path = volume.path
+		if volume.resolution_um:
+			settings.resolution = volume.resolution_um
+
+		if volume.remote and not volume.cached:
+			self.report({'INFO'}, "%s streams into %s" % (volume.name, volume.path))
+		elif not volume.remote and not volume.cached:
+			self.report({'WARNING'}, "%s is not at %s" % (volume.name, volume.path))
+		else:
+			self.report({'INFO'}, "Volume set to %s" % volume.name)
 		return {'FINISHED'}
 
 
@@ -334,6 +500,8 @@ def _import_menu(self, context):
 def register():
 	bpy.utils.register_class(velend_OT_load_hires)
 	bpy.utils.register_class(velend_OT_reload_volume)
+	bpy.utils.register_class(velend_OT_choose_volpkg)
+	bpy.utils.register_class(velend_OT_set_volpkg_volume)
 	bpy.utils.register_class(velend_OT_setup_scene)
 	bpy.utils.register_class(velend_OT_import_tifxyz)
 	bpy.types.VIEW3D_MT_view.append(_view_menu)
@@ -345,5 +513,7 @@ def unregister():
 	bpy.types.VIEW3D_MT_view.remove(_view_menu)
 	bpy.utils.unregister_class(velend_OT_import_tifxyz)
 	bpy.utils.unregister_class(velend_OT_setup_scene)
+	bpy.utils.unregister_class(velend_OT_set_volpkg_volume)
+	bpy.utils.unregister_class(velend_OT_choose_volpkg)
 	bpy.utils.unregister_class(velend_OT_reload_volume)
 	bpy.utils.unregister_class(velend_OT_load_hires)

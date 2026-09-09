@@ -28,10 +28,17 @@ Point the extension at a scan in the Properties editor, under Scene > Velend:
   in from the volume's directory name when that names it, as in
   `20250820131727-9.362um-1.2m-113keV-masked.zarr`.
 
-The URL and local directory must identify the same dataset. You can choose a zarr
-path from VC3D's ~/.VC3D/remote_cache/open_data/volumes and its corresponding server url
-and it will work the same way as VC3D does, downloading chunks to the same local
-zarr when missing.
+The URL and local directory must identify the same dataset. "Choose from
+volpkg.json" fills the three fields in from a VC3D project: pick a
+`.volpkg.json`, then one of the volumes it lists. The volume's zarr path
+becomes the cache directory VC3D reads it through, under
+`~/.VC3D/remote_cache/open_data/volumes`, and its source URL the one VC3D
+fetches it from. It then works the same way VC3D does, downloading chunks to
+the same local zarr when missing, so either program's downloads count for the
+other.
+
+The file browser opens in `~/.VC3D/remote_cache/open_data/projects`, where VC3D
+puts the open data projects it downloads; a project of your own works as well.
 
 Then hit "Setup Scene for Volume", which waits for loading and sets the rest up:
 - Scene > Units > Unit: mm

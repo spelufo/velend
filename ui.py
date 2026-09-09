@@ -239,6 +239,10 @@ class SCENE_PT_velend(bpy.types.Panel):
 		column.prop(settings, "source_url")
 		column.prop(settings, "resolution")
 
+		# Fills the three fields above in from a VC3D project, so it sits with
+		# them rather than with the buttons that act on what they name.
+		layout.operator("velend.choose_volpkg", icon='FILE_FOLDER')
+
 		layout.operator("velend.setup_scene", icon='SCENE_DATA')
 		layout.operator("velend.import_tifxyz", icon='IMPORT')
 
