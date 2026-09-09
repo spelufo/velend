@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "velend"
-version = "0.1.0"
+version = "0.2.0"
 name = "velend"
 tagline = "Explore the X-ray scans from the Vesuvius Challenge"
 maintainer = "Santiago Pelufo"
@@ -74,7 +74,8 @@ wheels = [
 # For longer explanations use the documentation or detail page.
 
 [permissions]
-files = "Read the OME-Zarr volume to render"
+files = "Read volumes and store downloaded objects in a local Zarr mirror"
+network = "Download public volume metadata and missing Zarr mirror objects"
 
 # Advanced build settings.
 # https://docs.blender.org/manual/en/latest/advanced/command_line/extension_arguments.html#command-line-args-extension-build

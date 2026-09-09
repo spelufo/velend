@@ -193,6 +193,7 @@ class BrickLoader:
 		# The pyramid's zarr arrays, indexed by level. Reads are thread safe, so
 		# every worker shares them.
 		self.volume = volume
+		self.error = None
 		self.done = queue.Queue()
 		self.executor = ThreadPoolExecutor(
 			max_workers=LOADER_THREADS, thread_name_prefix="velend-brick"
@@ -232,6 +233,7 @@ class BrickLoader:
 		try:
 			brick = read_brick(self.volume[level], chunk_xyz)
 		except Exception as error:
+			self.error = "L%d brick load failed: %s" % (level, error)
 			print("velend: L%d brick load failed at" % level, chunk_xyz, error)
 			brick = None
 		self.done.put((request_key, brick))

@@ -98,7 +98,34 @@ class velend_OT_setup_scene(bpy.types.Operator):
 	)
 	bl_options = {'REGISTER', 'UNDO'}
 
+	def modal(self, context, event):
+		engine = VolumeSamplerRenderEngine
+		key = (engine.volume_path(), engine.settings().source_url.strip())
+		if event.type == 'ESC' or key != self._key or context.scene != self._scene:
+			context.window_manager.event_timer_remove(self._timer)
+			return {'CANCELLED'}
+		if event.type != 'TIMER':
+			return {'PASS_THROUGH'}
+		volume = engine.get_volume()
+		if volume is None and engine.load_future is not None:
+			return {'PASS_THROUGH'}
+		context.window_manager.event_timer_remove(self._timer)
+		if volume is None:
+			self.report({'ERROR'}, engine.status()[0])
+			return {'CANCELLED'}
+		return self.execute(context)
+
 	def execute(self, context):
+		engine = VolumeSamplerRenderEngine
+		if engine.get_volume() is None:
+			if engine.load_future is None:
+				self.report({'ERROR'}, engine.status()[0])
+				return {'CANCELLED'}
+			self._key = (engine.volume_path(), engine.settings().source_url.strip())
+			self._scene = context.scene
+			self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
+			context.window_manager.modal_handler_add(self)
+			return {'RUNNING_MODAL'}
 		scene = context.scene
 		engine = VolumeSamplerRenderEngine
 
@@ -110,14 +137,9 @@ class velend_OT_setup_scene(bpy.types.Operator):
 		scene.render.engine = engine.bl_idname
 		_setup_viewports(context)
 
-		engine.ensure_grid()
-		if not engine.residencies:
-			self.report({'ERROR'}, engine.status()[0])
-			return {'CANCELLED'}
-		# A grid built before this ran measured itself against the old unit scale.
 		engine.voxels_per_unit = engine.compute_voxels_per_unit()
-
-		extents = [size / engine.voxels_per_unit for size in engine.shape_xyz]
+		shape_xyz = reversed(engine.get_volume()[0].shape)
+		extents = [size / engine.voxels_per_unit for size in shape_xyz]
 		center = [extent / 2.0 for extent in extents]
 		for name, rotation, (local_x, local_y) in _PLANE_SPECS:
 			plane = _ensure_plane(scene, name)

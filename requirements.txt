@@ -5,7 +5,7 @@
 # `scripts/build.py` bundles them into the extension as wheels.
 #
 # Blender's Python already ships numpy, so that is never bundled.
-zarr>=2.18.7,<4
+zarr>=3.3,<4
 
 # Reads the TIFFs of volume-cartographer's tifxyz surfaces.
 tifffile>=2024.1.30

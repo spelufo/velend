@@ -21,6 +21,10 @@ from .renderer import VolumeSamplerRenderEngine
 # that µm figure is the only place the voxel size is written down.
 _RESOLUTION_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)um")
 
+# The catalogue selectors are useful for inspecting metadata, but are not part
+# of the current workflow. Keep their implementation ready for when they are.
+_SHOW_METADATA_DROPDOWNS = False
+
 
 def resolution_from_path(path):
 	"""The voxel size named by a volume directory, or None if it names none."""
@@ -123,6 +127,7 @@ def _volume_updated(self, context):
 	# Assigning fires `_volume_path_updated`, which reopens the volume and
 	# reads the voxel size out of the URL. The manifest states it outright,
 	# so take it from there instead.
+	self.source_url = ""
 	self.volume_path = volume.zarr_url
 	if volume.pixel_size_um:
 		self.resolution = volume.pixel_size_um
@@ -183,6 +188,12 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		subtype='DIR_PATH',
 		update=_volume_path_updated,
 	)
+	source_url: bpy.props.StringProperty(
+		name="Source URL",
+		description="Public HTTP(S) Zarr root for missing local mirror objects",
+		default="",
+		update=_volume_path_updated,
+	)
 	resolution: bpy.props.FloatProperty(
 		name="Voxel Size",
 		description=(
@@ -213,17 +224,19 @@ class SCENE_PT_velend(bpy.types.Panel):
 		column = layout.column()
 		column.use_property_split = True
 		column.use_property_decorate = False
-		if metadata.SAMPLES:
-			column.prop(settings, "sample_id")
-			if settings.sample_id:
-				column.prop(settings, "volume_id")
-				column.prop(settings, "segment_id")
-		else:
-			# The catalogue downloads and parses on a thread at startup, and
-			# stays empty when that failed with nothing cached to fall back on.
-			column.label(text="Loading metadata...", icon='INFO')
-		column.separator()
+		if _SHOW_METADATA_DROPDOWNS:
+			if metadata.SAMPLES:
+				column.prop(settings, "sample_id")
+				if settings.sample_id:
+					column.prop(settings, "volume_id")
+					column.prop(settings, "segment_id")
+			else:
+				# The catalogue downloads and parses on a thread at startup, and
+				# stays empty when that failed with nothing cached to fall back on.
+				column.label(text="Loading metadata...", icon='INFO')
+			column.separator()
 		column.prop(settings, "volume_path")
+		column.prop(settings, "source_url")
 		column.prop(settings, "resolution")
 
 		layout.operator("velend.setup_scene", icon='SCENE_DATA')

@@ -1,0 +1,217 @@
+import asyncio
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+import gc
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import threading
+import types
+import unittest
+from unittest import mock
+
+import numpy as np
+import zarr
+from zarr.abc.store import RangeByteRequest, OffsetByteRequest, SuffixByteRequest
+from zarr.core.buffer import default_buffer_prototype
+
+ROOT = Path(__file__).resolve().parents[1]
+package = types.ModuleType('velend_test')
+package.__path__ = [str(ROOT)]
+sys.modules.setdefault('velend_test', package)
+MirrorStore = importlib.import_module('velend_test.mirror').MirrorStore
+state = importlib.import_module('velend_test.state')
+
+
+class MirrorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.objects = {}
+        self.requests = Counter()
+        owner = self
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                owner.requests[self.path] += 1
+                if self.path == '/error':
+                    self.send_error(503)
+                    return
+                if self.path == '/short':
+                    self.send_response(200)
+                    self.send_header('Content-Length', '100')
+                    self.end_headers()
+                    self.wfile.write(b'short')
+                    self.close_connection = True
+                    return
+                data = owner.objects.get(self.path)
+                if data is None:
+                    self.send_error(404)
+                else:
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+            def log_message(self, *args):
+                pass
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.url = 'http://127.0.0.1:%d' % self.server.server_port
+        self.cache = self.root / 'cache'
+        self.store = MirrorStore(self.cache, self.url)
+
+    def tearDown(self):
+        state.close_volume()
+        self.store = None
+        gc.collect()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+        self.temp.cleanup()
+
+    def test_entrypoints_and_exact_bytes(self):
+        data = bytes(range(256)) * 10
+        self.objects['/0/1.2.3'] = data
+        with ThreadPoolExecutor(12) as pool:
+            results = list(pool.map(lambda _: self.store.get_sync('0/1.2.3').to_bytes(), range(24)))
+        self.assertTrue(all(result == data for result in results))
+        self.assertEqual(self.requests['/0/1.2.3'], 1)
+        self.assertEqual((self.cache / '0/1.2.3').read_bytes(), data)
+        proto = default_buffer_prototype()
+        ranges = [RangeByteRequest(2, 9), OffsetByteRequest(2558), SuffixByteRequest(3)]
+        expected = [data[2:9], data[2558:], data[-3:]]
+        async def reads():
+            self.assertTrue(await self.store.exists('0/1.2.3'))
+            self.assertEqual(await self.store.getsize('0/1.2.3'), len(data))
+            values = await self.store.get_partial_values(proto, [('0/1.2.3', r) for r in ranges])
+            self.assertEqual([v.to_bytes() for v in values], expected)
+            batches = [b async for b in self.store.get_ranges('0/1.2.3', ranges, prototype=proto)]
+            self.assertEqual({i: v.to_bytes() for b in batches for i, v in b}, dict(enumerate(expected)))
+            values = [v async for v in self.store._get_many([('0/1.2.3', proto, None)])]
+            self.assertEqual(values[0][1].to_bytes(), data)
+        asyncio.run(reads())
+        self.assertEqual(dict((i, v.to_bytes()) for i, v in self.store.get_ranges_sync('0/1.2.3', ranges, prototype=proto)), dict(enumerate(expected)))
+        self.assertEqual(self.requests['/0/1.2.3'], 1)
+
+    def test_markers_errors_offline_and_metadata(self):
+        self.assertIsNone(self.store.get_sync('0/0/0/0'))
+        self.assertTrue((self.cache / '0/0/0/0.empty').exists())
+        (self.cache / '0/0/0/0').write_bytes(b'ignored')
+        self.assertIsNone(self.store.get_sync('0/0/0/0'))
+        self.assertEqual(self.requests['/0/0/0/0'], 1)
+        for key in ('.zattrs', '0/zarr.json'):
+            self.assertIsNone(self.store.get_sync(key))
+            self.assertFalse((self.cache / (key + '.empty')).exists())
+        for key in ('error', 'short'):
+            with self.assertRaises(Exception):
+                self.store.get_sync(key)
+            self.assertFalse((self.cache / key).exists())
+            self.assertFalse((self.cache / (key + '.empty')).exists())
+        self.assertFalse(list(self.cache.rglob('*.tmp.*')))
+        (self.cache / 'cached').write_bytes(b'local')
+        self.store.online = lambda: False
+        self.assertEqual(self.store.get_sync('cached').to_bytes(), b'local')
+        with self.assertRaisesRegex(OSError, 'disabled'):
+            self.store.get_sync('uncached')
+
+    def test_empty_initialization_fill_and_shards(self):
+        for version in (2, 3):
+            source = self.root / ('source%d' % version)
+            group = zarr.open_group(source, mode='w', zarr_format=version)
+            group.attrs['multiscales'] = [{'datasets': [{'path': '0'}]}]
+            kwargs = {'shards': (4, 4, 4)} if version == 3 else {}
+            array = group.create_array('0', shape=(8, 8, 8), chunks=(2, 2, 2), dtype='u1', fill_value=17, **kwargs)
+            array[:2, :2, :2] = 42
+            for path in source.rglob('*'):
+                if path.is_file():
+                    self.objects['/' + path.relative_to(source).as_posix()] = path.read_bytes()
+            volume = state.open_volume(str(self.root / ('mirror%d' % version)), self.url)
+            np.testing.assert_array_equal(volume[0][:], array[:])
+            np.testing.assert_array_equal(volume[0][1:3, 1:3, 1:3], array[1:3, 1:3, 1:3])
+            self.objects.clear()
+        local = state.open_volume(str(source))
+        np.testing.assert_array_equal(local[0][:], array[:])
+
+    @unittest.skipIf(sys.platform == 'win32', 'Unix flock interoperability')
+    def test_lease_lifetime_and_contention(self):
+        lock = self.root / '.cache.vc_cache.lock'
+        code = 'import os,fcntl,sys; f=os.open(sys.argv[1],os.O_RDWR); fcntl.flock(f,int(sys.argv[2])|fcntl.LOCK_NB)'
+        import fcntl
+        def attempt(mode):
+            return subprocess.run([sys.executable, '-c', code, str(lock), str(mode)], capture_output=True).returncode
+        self.assertEqual(attempt(fcntl.LOCK_SH), 0)
+        self.assertNotEqual(attempt(fcntl.LOCK_EX), 0)
+        self.store = None
+        gc.collect()
+        self.assertEqual(attempt(fcntl.LOCK_EX), 0)
+        with lock.open('r+') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(OSError, 'lease'):
+                MirrorStore(self.cache, self.url)
+        self.assertTrue(lock.exists())
+
+    @unittest.skipIf(sys.platform == 'win32', 'Unix flock interoperability')
+    def test_outstanding_write_keeps_lease_and_publishes_atomically(self):
+        import fcntl
+        self.objects['/chunk'] = b'exact bytes'
+        entered, release = threading.Event(), threading.Event()
+        mirror = importlib.import_module('velend_test.mirror')
+        replace = mirror.os.replace
+        def publish(source, destination):
+            self.assertIn('.tmp.', source.name)
+            self.assertFalse(destination.exists())
+            self.assertEqual(source.read_bytes(), b'exact bytes')
+            entered.set()
+            self.assertTrue(release.wait(5))
+            replace(source, destination)
+        with mock.patch.object(mirror.os, 'replace', publish), ThreadPoolExecutor(1) as pool:
+            future = pool.submit(self.store.get_sync, 'chunk')
+            try:
+                self.assertTrue(entered.wait(5))
+                self.store = None
+                state.close_volume()
+                gc.collect()
+                code = 'import os,fcntl,sys; f=os.open(sys.argv[1],os.O_RDWR); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)'
+                result = subprocess.run([sys.executable, '-c', code, str(self.root / '.cache.vc_cache.lock')], capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+            finally:
+                release.set()
+            self.assertEqual(future.result(timeout=5).to_bytes(), b'exact bytes')
+        self.assertFalse(list(self.cache.rglob('*.tmp.*')))
+
+    def test_state_keys_include_url_and_old_arrays_keep_lease(self):
+        source = self.root / 'local'
+        group = zarr.open_group(source, mode='w', zarr_format=2)
+        group.attrs['multiscales'] = [{'datasets': [{'path': '0'}]}]
+        group.create_array('0', shape=(2, 2, 2), chunks=(2, 2, 2), dtype='u1')
+        first = state.get_volume(str(source))
+        self.assertIs(state.get_volume(str(source)), first)
+        second = state.get_volume(str(source), self.url)
+        self.assertIsNot(second, first)
+        self.assertIs(state.get_volume(str(source), self.url), second)
+        state.close_volume()
+        self.assertEqual(second[0].shape, (2, 2, 2))
+
+    def test_unsafe_and_incompatible(self):
+        for key in ('../escape', '/absolute', 'a//b', 'a/../b', 'C:/foo', 'a\\b'):
+            with self.assertRaises(ValueError):
+                self.store.get_sync(key)
+        for path in ('https://host/cache', '//host/cache'):
+            with self.assertRaises(ValueError):
+                MirrorStore(path, self.url)
+        legacy = self.root / 'legacy'
+        (legacy / 'level_0').mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'Legacy'):
+            MirrorStore(legacy, self.url)
+        self.assertFalse((legacy / '.zgroup').exists())
+        (self.cache / '.vc_delta3d_cache').write_text('D3D1\n')
+        with self.assertRaisesRegex(ValueError, 'Delta3D'):
+            MirrorStore(self.cache, self.url)
+        self.assertEqual((self.cache / '.vc_delta3d_cache').read_text(), 'D3D1\n')
+
+
+if __name__ == '__main__':
+    unittest.main()

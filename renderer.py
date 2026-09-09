@@ -1,5 +1,6 @@
 import os
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 import bpy
 import gpu
 import numpy as np
@@ -28,6 +29,11 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	# Created on the first draw, where a GPU context is guaranteed to be active,
 	# and shared by all engine instances (Blender creates one per viewport).
+	load_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="velend-volume")
+	load_future = None
+	load_key = None
+	pyramid = None
+	coarse = None
 	volume = None
 	shader = None
 	shader_mtimes = None
@@ -94,37 +100,53 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			return ""
 		# The file browser always hands back an absolute path; expanding covers
 		# the paths typed into the field by hand.
+		if "://" in path:
+			return path
 		return os.path.expanduser(bpy.path.abspath(path))
 
 	@classmethod
 	def get_volume(cls):
 		"""The scene's pyramid, or None with the reason left in `volume_error`."""
 		path = cls.volume_path()
+		key = (path, cls.settings().source_url.strip())
+		state.online_access = bpy.app.online_access
 		if not path:
 			cls.volume_error = "No volume set"
 			return None
-		if path == cls.failed_path:
+		if key == cls.failed_path:
+			return None
+		if cls.load_key != key:
+			cls.pyramid = cls.coarse = None
+			cls.load_key = key
+			cls.load_future = cls.load_executor.submit(cls.load_initial, *key)
+		if cls.pyramid is not None:
+			return cls.pyramid
+		if not cls.load_future.done():
+			cls.volume_error = "Loading volume..."
 			return None
 		try:
-			volume = state.get_volume(path)
+			cls.pyramid, cls.coarse = cls.load_future.result()
 		except Exception as error:
-			# Remembered rather than retried: this runs on every draw.
-			cls.failed_path = path
+			cls.failed_path = key
 			cls.volume_error = "Cannot open volume: %s" % error
 			print("velend:", cls.volume_error)
+			cls.load_future = None
 			return None
-		if len(volume) <= bricks.FALLBACK_LEVEL:
-			# The coarsest level is the whole-volume fallback texture, and every
-			# finer one is streamed, so a shallower pyramid has nothing to fall
-			# back on.
-			cls.failed_path = path
-			cls.volume_error = "Volume has %d pyramid levels, %d are needed" % (
-				len(volume), bricks.FALLBACK_LEVEL + 1
-			)
-			print("velend:", cls.volume_error)
-			return None
+		cls.load_future = None
 		cls.volume_error = None
-		return volume
+		return cls.pyramid
+
+	@staticmethod
+	def load_initial(path, source_url):
+		if not source_url and "://" in path and not state.online_access:
+			raise OSError("Network access is disabled in Blender")
+		volume = state.open_volume(path, source_url)
+		if len(volume) <= bricks.FALLBACK_LEVEL:
+			raise ValueError("Volume has %d pyramid levels, %d are needed" % (
+				len(volume), bricks.FALLBACK_LEVEL + 1))
+		lores = np.ascontiguousarray(volume[bricks.FALLBACK_LEVEL][:], dtype=np.float32)
+		lores *= np.float32(1.0 / 255.0)
+		return volume, lores
 
 	@classmethod
 	def compute_voxels_per_unit(cls):
@@ -139,7 +161,9 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		if not cls.settings().volume_path.strip():
 			return "No volume set", 'INFO'
 		if cls.volume_error:
-			return cls.volume_error, 'ERROR'
+			return cls.volume_error, 'INFO' if cls.load_future is not None else 'ERROR'
+		if cls.loader is not None and cls.loader.error:
+			return cls.loader.error, 'ERROR'
 		if cls.shape_xyz is None or cls.pending_reset:
 			return "Not loaded yet", 'INFO'
 		return "%d x %d x %d voxels" % cls.shape_xyz, 'CHECKMARK'
@@ -147,6 +171,11 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	@classmethod
 	def reset(cls):
 		"""Ask for everything derived from the volume to be rebuilt."""
+		if cls.load_future is not None:
+			cls.load_future.cancel()
+		cls.load_future = None
+		cls.load_key = None
+		cls.pyramid = cls.coarse = None
 		cls.pending_reset = True
 		# Cleared here rather than in the deferred teardown so that the panel
 		# stops reporting the previous volume's trouble straight away.
@@ -205,7 +234,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	def request_redraw(cls):
 		for window in bpy.context.window_manager.windows:
 			for area in window.screen.areas:
-				if area.type == 'IMAGE_EDITOR' and area.spaces.active.mode == 'UV':
+				if area.type == 'PROPERTIES' or (area.type == 'IMAGE_EDITOR' and area.spaces.active.mode == 'UV'):
 					area.tag_redraw()
 		for engine in list(cls.live_instances):
 			try:
@@ -254,10 +283,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		volume = cls.get_volume()
 		if volume is None:
 			return
-		lores = np.ascontiguousarray(
-			volume[bricks.FALLBACK_LEVEL][:], dtype=np.float32
-		)
-		lores *= np.float32(1.0 / 255.0)
+		lores = cls.coarse
 
 		# Numpy is C-order (Z, Y, X); GPUTexture is (width, height, depth). The
 		# level 5 array covers the level 0 extent rounded up to a multiple of
@@ -452,6 +478,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.ensure_grid()
 		if not cls.residencies:
 			return 0
+		cls.loader.error = None
 		l0_residency = cls.residencies[0]
 		dims = np.asarray(l0_residency.dims, dtype=np.int64)
 		focus_voxel = np.asarray(focus, dtype=np.float64) * cls.voxels_per_unit
@@ -731,6 +758,9 @@ def _watch_shader_files():
 
 
 def _watch_streaming():
+	state.online_access = bpy.app.online_access
+	if VolumeSamplerRenderEngine.load_future is not None:
+		VolumeSamplerRenderEngine.request_redraw()
 	loader = VolumeSamplerRenderEngine.loader
 	if loader is not None and not loader.idle():
 		VolumeSamplerRenderEngine.request_redraw()
@@ -768,6 +798,8 @@ def register():
 
 
 def unregister():
+	VolumeSamplerRenderEngine.reset()
+	state.close_volume()
 	if _load_post in bpy.app.handlers.load_post:
 		bpy.app.handlers.load_post.remove(_load_post)
 	if bpy.app.timers.is_registered(_watch_cursor):

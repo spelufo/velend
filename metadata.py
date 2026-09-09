@@ -350,7 +350,7 @@ def load_in_background():
 	"""
 	thread = threading.Thread(
 		target=load,
-		args=(cache_path(), overlay_path()),
+		args=(cache_path(), overlay_path(), bpy.app.online_access),
 		name="velend-metadata",
 		daemon=True,
 	)

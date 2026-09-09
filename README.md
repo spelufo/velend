@@ -17,20 +17,23 @@ Download the zip for your platform from the
 
 ### Setup
 
-NOTE: For the moment velend won't download volume chunks on the fly like VC3D.
-It will render with whatever chunks are present in the zarr. If you've opened a volume in
-VC3D before, then your omezar will at least have the L5 most downsampled data.
-Use something like [vc_zarr_download_region](https://github.com/ScrollPrize/villa/pull/1707)
-to download a region of an omezar at all levels of detail.
-
 Point the extension at a scan in the Properties editor, under Scene > Velend:
 
-- Volume: the OME-Zarr directory of the scan.
+- Volume: the local OME-Zarr directory of the scan, or an empty directory to
+  use as a download cache.
+- Source URL (optional): the public HTTP(S) root of that same OME-Zarr dataset.
+  Missing metadata and chunks download into Volume. Leave it blank to retain
+  the existing behavior without mirror downloads.
 - Voxel Size: how wide a full resolution voxel is, in micrometers. It is filled
   in from the volume's directory name when that names it, as in
   `20250820131727-9.362um-1.2m-113keV-masked.zarr`.
 
-Then hit "Setup Scene for Volume", which sets the rest up:
+The URL and local directory must identify the same dataset. You can choose a zarr
+path from VC3D's ~/.VC3D/remote_cache/open_data/volumes and its corresponding server url
+and it will work the same way as VC3D does, downloading chunks to the same local
+zarr when missing.
+
+Then hit "Setup Scene for Volume", which waits for loading and sets the rest up:
 - Scene > Units > Unit: mm
 - Scene > Units > Unit scale: 0.001
 - Render > Render Engine: Volume Sampler
