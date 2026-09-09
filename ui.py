@@ -10,6 +10,7 @@ import re
 
 import bpy
 
+from . import metadata
 from . import state
 from .renderer import VolumeSamplerRenderEngine
 
@@ -41,7 +42,141 @@ def _resolution_updated(self, context):
 	VolumeSamplerRenderEngine.rescale()
 
 
+# Blender does not copy the strings an enum callback returns, so anything they
+# hand out has to outlive the call. Keeping the last list per property is the
+# usual way around it; without it the menus fill with garbage.
+_enum_items = {}
+
+
+def _items(key, items):
+	_enum_items[key] = items
+	return items
+
+
+def _sample_items(self, context):
+	samples = sorted(metadata.SAMPLES.values(), key=lambda sample: sample.id)
+	return _items("samples", [
+		(sample.id, sample.id, (sample.type or "sample").capitalize())
+		for sample in samples
+	])
+
+
+def _volume_items(self, context):
+	sample = metadata.SAMPLES.get(self.sample_id)
+	if sample is None:
+		return _items("volumes", [])
+	volumes = sorted(
+		sample.volumes.values(),
+		key=lambda volume: (volume.pixel_size_um or 0.0, volume.id),
+	)
+	return _items("volumes", [
+		(volume.id, volume.long_id, _volume_description(volume))
+		for volume in volumes
+	])
+
+
+def _volume_description(volume):
+	shape = " x ".join(str(size) for size in reversed(volume.shape or ()))
+	return "%s voxels of %s um, %s keV" % (
+		shape or "?",
+		volume.pixel_size_um or "?",
+		volume.energy_keV or "?",
+	)
+
+
+def _segment_items(self, context):
+	sample = metadata.SAMPLES.get(self.sample_id)
+	if sample is None:
+		return _items("segments", [])
+	segments = sorted(
+		sample.segments.values(), key=lambda segment: segment.id, reverse=True
+	)
+	return _items("segments", [
+		(segment.id, segment.name or segment.long_id, _segment_description(segment))
+		for segment in segments
+	])
+
+
+def _segment_description(segment):
+	traced_in = segment.volume.long_id if segment.volume else "?"
+	return "%s x %s, traced in %s" % (
+		segment.width or "?", segment.height or "?", traced_in
+	)
+
+
+def _sample_updated(self, context):
+	# The enums below hold an index into whatever their callback last returned,
+	# so a new sample would otherwise leave them pointing at whichever of its
+	# volumes and segments happens to sit at the old one's place.
+	volumes = _volume_items(self, context)
+	if volumes:
+		self.volume_id = volumes[0][0]
+	segments = _segment_items(self, context)
+	if segments:
+		self.segment_id = segments[0][0]
+
+
+def _volume_updated(self, context):
+	volume = metadata.VOLUMES.get(self.volume_id)
+	if volume is None or not volume.zarr_url:
+		return
+	# Assigning fires `_volume_path_updated`, which reopens the volume and
+	# reads the voxel size out of the URL. The manifest states it outright,
+	# so take it from there instead.
+	self.volume_path = volume.zarr_url
+	if volume.pixel_size_um:
+		self.resolution = volume.pixel_size_um
+
+
+def _overlay_path_updated(self, context):
+	# Cheap to redo: the manifest itself is cached, and the server answers the
+	# freshness check with a 304 rather than 15MB of JSON.
+	metadata.load_in_background()
+
+
+class VelendPreferences(bpy.types.AddonPreferences):
+	# Preferences are looked up by the add-on's package name, which for an
+	# extension is its full "bl_ext.<repository>.velend" module path.
+	bl_idname = __package__
+
+	overlay_path: bpy.props.StringProperty(
+		name="Extra Metadata",
+		description=(
+			"JSON file shaped like the open data metadata.json, merged over "
+			"it. Anything it names wins, so it can carry volume transforms, "
+			"volumes or segments that the published metadata does not have yet"
+		),
+		subtype='FILE_PATH',
+		update=_overlay_path_updated,
+	)
+
+	def draw(self, context):
+		layout = self.layout
+		layout.use_property_split = True
+		layout.prop(self, "overlay_path")
+
+
 class VelendSceneSettings(bpy.types.PropertyGroup):
+	sample_id: bpy.props.EnumProperty(
+		name="Sample",
+		description="The scroll or fragment to browse",
+		items=_sample_items,
+		update=_sample_updated,
+		options=set(),
+	)
+	volume_id: bpy.props.EnumProperty(
+		name="Volume",
+		description="Which of the sample's volumes to render",
+		items=_volume_items,
+		update=_volume_updated,
+		options=set(),
+	)
+	segment_id: bpy.props.EnumProperty(
+		name="Segment",
+		description="One of the sample's traced sheets of papyrus",
+		items=_segment_items,
+		options=set(),
+	)
 	volume_path: bpy.props.StringProperty(
 		name="Volume",
 		description="OME-Zarr directory holding the multiresolution volume",
@@ -73,9 +208,21 @@ class SCENE_PT_velend(bpy.types.Panel):
 		settings = context.scene.velend
 
 		# Only the fields are split into label and value columns; the buttons
-		# below would be indented into the value column with them.
+		# below would be indented into the value column with them. Nothing
+		# here is worth keyframing, so no animate decorators either.
 		column = layout.column()
 		column.use_property_split = True
+		column.use_property_decorate = False
+		if metadata.SAMPLES:
+			column.prop(settings, "sample_id")
+			if settings.sample_id:
+				column.prop(settings, "volume_id")
+				column.prop(settings, "segment_id")
+		else:
+			# The catalogue downloads and parses on a thread at startup, and
+			# stays empty when that failed with nothing cached to fall back on.
+			column.label(text="Loading metadata...", icon='INFO')
+		column.separator()
 		column.prop(settings, "volume_path")
 		column.prop(settings, "resolution")
 
@@ -90,6 +237,7 @@ class SCENE_PT_velend(bpy.types.Panel):
 
 
 def register():
+	bpy.utils.register_class(VelendPreferences)
 	bpy.utils.register_class(VelendSceneSettings)
 	bpy.utils.register_class(SCENE_PT_velend)
 	bpy.types.Scene.velend = bpy.props.PointerProperty(type=VelendSceneSettings)
@@ -99,3 +247,4 @@ def unregister():
 	del bpy.types.Scene.velend
 	bpy.utils.unregister_class(SCENE_PT_velend)
 	bpy.utils.unregister_class(VelendSceneSettings)
+	bpy.utils.unregister_class(VelendPreferences)
