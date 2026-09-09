@@ -4,11 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 import gc
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -22,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 package = types.ModuleType('velend_test')
 package.__path__ = [str(ROOT)]
 sys.modules.setdefault('velend_test', package)
-MirrorStore = importlib.import_module('velend_test.mirror').MirrorStore
+mirror = importlib.import_module('velend_test.mirror')
+MirrorStore = mirror.MirrorStore
 state = importlib.import_module('velend_test.state')
 
 
@@ -211,6 +214,82 @@ class MirrorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Delta3D'):
             MirrorStore(self.cache, self.url)
         self.assertEqual((self.cache / '.vc_delta3d_cache').read_text(), 'D3D1\n')
+
+    def budget_store(self, maximum, minimum_free=0):
+        """A store held to the given limits, its cache inside VC3D's root."""
+        for target, value in (('cache_limits', lambda: (maximum, minimum_free)),
+                              ('remote_cache_root', lambda: str(self.root))):
+            patch = mock.patch.object(mirror.volpkg, target, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        return MirrorStore(self.cache, self.url)
+
+    def scanned(self, budget):
+        """The budget's total, once its background scan has landed."""
+        deadline = time.monotonic() + 5
+        while budget._bytes is None:
+            self.assertLess(time.monotonic(), deadline, 'scan did not finish')
+            time.sleep(0.01)
+        return budget._bytes
+
+    def test_budget_refuses_downloads_that_would_fill_the_disk(self):
+        store = self.budget_store(None, minimum_free=1 << 62)
+        self.objects['/0/0'] = b'x' * 100
+        with self.assertRaisesRegex(OSError, 'free'):
+            store.get_sync('0/0')
+        self.assertFalse((self.cache / '0/0').exists())
+
+    def test_budget_refuses_downloads_past_the_maximum(self):
+        self.cache.mkdir(parents=True, exist_ok=True)
+        (self.cache / 'existing').write_bytes(b'x' * 400)
+        store = self.budget_store(500)
+        self.assertEqual(self.scanned(store.budget), 400)
+
+        self.objects['/0/0'] = b'x' * 50
+        self.assertEqual(store.get_sync('0/0').to_bytes(), b'x' * 50)
+        self.assertEqual(store.budget._bytes, 450)
+
+        self.objects['/0/1'] = b'x' * 100
+        with self.assertRaisesRegex(OSError, 'maximum'):
+            store.get_sync('0/1')
+        self.assertFalse((self.cache / '0/1').exists())
+        # What is already cached stays readable when the cache is full.
+        self.assertEqual(store.get_sync('0/0').to_bytes(), b'x' * 50)
+
+    def test_budget_leaves_room_for_the_metadata_a_zarr_needs(self):
+        store = self.budget_store(0)
+        self.assertEqual(self.scanned(store.budget), 0)
+        for key in ('.zattrs', '0/zarr.json'):
+            self.objects['/' + key] = b'{}'
+            self.assertEqual(store.get_sync(key).to_bytes(), b'{}')
+        self.objects['/0/0'] = b'x'
+        with self.assertRaisesRegex(OSError, 'maximum'):
+            store.get_sync('0/0')
+
+    def test_budget_is_only_the_free_space_floor_outside_vc3ds_cache(self):
+        patch = mock.patch.object(
+            mirror.volpkg, 'remote_cache_root', lambda: str(self.root / 'vc3d'))
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(
+            mirror.volpkg, 'cache_limits', lambda: (500, 0))
+        patch.start()
+        self.addCleanup(patch.stop)
+        store = MirrorStore(self.cache, self.url)
+        # A mirror of one's own is not part of what VC3D counts, so it keeps
+        # the unlimited behaviour VC3D gives such volumes.
+        self.assertIsNone(store.budget.maximum)
+        self.assertEqual(store.budget.root, self.cache.resolve())
+
+    def test_a_cache_hit_bumps_the_time_vc3d_evicts_by(self):
+        self.objects['/0/0'] = b'x' * 10
+        self.store.get_sync('0/0')
+        path = self.cache / '0/0'
+        stale = time.time() - 86400
+        os.utime(path, (stale, stale))
+        self.assertEqual(self.store.get_sync('0/0').to_bytes(), b'x' * 10)
+        self.assertGreater(path.stat().st_mtime, stale + 1)
+        self.assertEqual(self.requests['/0/0'], 1)
 
 
 if __name__ == '__main__':

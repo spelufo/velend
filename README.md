@@ -40,6 +40,16 @@ other.
 The file browser opens in `~/.VC3D/remote_cache/open_data/projects`, where VC3D
 puts the open data projects it downloads; a project of your own works as well.
 
+Downloads into VC3D's cache stay within the budget its settings put on it,
+under Preferences > Performance: the maximum it may grow to and the free space
+it must leave the disk. Reaching either stops the downloads, with the reason in
+the panel, rather than filling the disk. Nothing is ever deleted here: VC3D
+evicts the least recently read chunk when it needs room, counting ours along
+with its own, and a read served from the cache marks the chunk recent so that
+what you are working on is not the first thing it throws away. A mirror
+directory of your own, outside VC3D's cache, is held only to the free space
+floor.
+
 Then hit "Setup Scene for Volume", which waits for loading and sets the rest up:
 - Scene > Units > Unit: mm
 - Scene > Units > Unit scale: 0.001

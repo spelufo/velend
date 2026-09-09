@@ -117,6 +117,32 @@ class SettingsTests(unittest.TestCase):
                 mock.patch('os.path.isdir', return_value=False):
             self.assertTrue(volpkg.remote_cache_root().endswith('/.VC3D/remote_cache'))
 
+    def limits(self, text):
+        self.write(text)
+        with mock.patch.object(volpkg, 'settings_path', lambda: str(self.path)):
+            return volpkg.cache_limits()
+
+    def test_reads_the_cache_budget(self):
+        self.assertEqual(
+            self.limits('[perf]\nremote_cache_max_gib=200\n'
+                        'remote_cache_min_free_gib=30\n'),
+            (200 * (1 << 30), 30 * (1 << 30)))
+
+    def test_a_maximum_of_zero_means_unlimited(self):
+        maximum, free = self.limits('[perf]\nremote_cache_max_gib=0\n')
+        self.assertIsNone(maximum)
+        # VC3D's own default for the floor, which zero does not disable.
+        self.assertEqual(free, 20 * (1 << 30))
+
+    def test_vc3ds_defaults_when_the_settings_say_nothing(self):
+        self.assertEqual(self.limits('[viewer]\nother=1\n'), (None, 20 * (1 << 30)))
+
+    def test_nonsense_reads_as_the_default(self):
+        self.assertEqual(
+            self.limits('[perf]\nremote_cache_max_gib=lots\n'
+                        'remote_cache_min_free_gib=-5\n'),
+            (None, 0))
+
 
 class ProjectTests(unittest.TestCase):
     def setUp(self):

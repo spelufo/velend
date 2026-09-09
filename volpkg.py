@@ -175,6 +175,30 @@ def remote_cache_root():
 	return os.path.join(os.path.expanduser("~"), ".VC3D", "remote_cache")
 
 
+def cache_limits():
+	"""How much room VC3D's settings allow its cache: `(maximum, free)`, both
+	in bytes, the maximum None when they put no ceiling on it.
+
+	VC3D hands these to the budget that counts every chunk under the cache root
+	and evicts the least recently read of them to make room, whoever downloaded
+	it. It reads them once, at startup, and so do we, per volume opened.
+	"""
+	path = settings_path()
+	# A maximum of zero means unlimited, and is VC3D's own default. The floor
+	# under the free space it leaves the disk applies either way.
+	maximum = _ini_gib(path, "remote_cache_max_gib", 0)
+	return maximum or None, _ini_gib(path, "remote_cache_min_free_gib", 20)
+
+
+def _ini_gib(path, key, default):
+	"""One of the settings' GiB counts, in bytes."""
+	try:
+		count = int(_ini_value(path, "perf", key))
+	except ValueError:
+		count = default
+	return max(count, 0) * (1 << 30)
+
+
 def projects_dir():
 	"""Where VC3D puts the open data projects it downloads."""
 	return os.path.join(remote_cache_root(), "open_data", "projects")
