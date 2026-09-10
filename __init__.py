@@ -12,6 +12,7 @@ from . import atlas
 from . import renderer
 from . import uv_renderer
 from . import tifxyz
+from . import umbilicus
 from . import volpkg
 from . import commands
 from . import ui
@@ -22,6 +23,7 @@ _modules = [
 	renderer,
 	uv_renderer,
 	tifxyz,
+	umbilicus,
 	volpkg,
 	commands,
 	ui,

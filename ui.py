@@ -244,7 +244,9 @@ class SCENE_PT_velend(bpy.types.Panel):
 		layout.operator("velend.choose_volpkg", icon='FILE_FOLDER')
 
 		layout.operator("velend.setup_scene", icon='SCENE_DATA')
-		layout.operator("velend.import_tifxyz", icon='IMPORT')
+		row = layout.row(align=True)
+		row.operator("velend.import_tifxyz", text="Import Surface", icon='IMPORT')
+		row.operator("velend.import_umbilicus", text="Import Umbilicus", icon='IMPORT')
 
 		status, icon = VolumeSamplerRenderEngine.status()
 		layout.label(text=status, icon=icon)

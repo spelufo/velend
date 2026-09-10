@@ -6,6 +6,7 @@ import numpy as np
 
 from . import state
 from . import tifxyz
+from . import umbilicus
 from . import volpkg
 from .renderer import VolumeSamplerRenderEngine
 
@@ -486,6 +487,93 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 		return {'FINISHED'}
 
 
+def _umbilicus_mesh(name, curve, voxels_per_unit):
+	"""A mesh of the umbilicus' points joined into a polyline, in Blender units."""
+	mesh = bpy.data.meshes.new(name)
+	positions = (curve.positions / voxels_per_unit).astype(np.float32)
+	mesh.vertices.add(len(positions))
+	mesh.edges.add(len(curve.edges))
+	mesh.vertices.foreach_set("co", positions.ravel())
+	mesh.edges.foreach_set("vertices", curve.edges.ravel())
+	mesh.update()
+	mesh.validate()
+	return mesh
+
+
+class velend_OT_import_umbilicus(bpy.types.Operator):
+	bl_idname = "velend.import_umbilicus"
+	bl_label = "Import Umbilicus"
+	bl_description = (
+		"Import an umbilicus.json as a polyline running up the scroll's core"
+	)
+	bl_options = {'REGISTER', 'UNDO'}
+
+	filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
+	filter_glob: bpy.props.StringProperty(
+		default="*.json;*.txt;*.csv", options={'HIDDEN', 'SKIP_SAVE'}
+	)
+
+	voxel_size: bpy.props.FloatProperty(
+		name="Voxel Size",
+		description=(
+			"Width of a full resolution voxel, in micrometers, for the volume "
+			"the points were placed in. Filled in from the scene's own voxel "
+			"size, and overridden by the file when it states one of its own"
+		),
+		default=9.362,
+		min=1e-6,
+		soft_max=100.0,
+		precision=3,
+	)
+
+	def invoke(self, context, event):
+		# The scene's volume is the one an umbilicus most likely belongs to.
+		self.voxel_size = context.scene.velend.resolution
+		context.window_manager.fileselect_add(self)
+		return {'RUNNING_MODAL'}
+
+	def execute(self, context):
+		path = os.path.expanduser(bpy.path.abspath(self.filepath.strip()))
+		if not os.path.isfile(path):
+			self.report({'ERROR'}, "No umbilicus file to import")
+			return {'CANCELLED'}
+		try:
+			curve = umbilicus.read_umbilicus(path)
+		except Exception as error:
+			self.report({'ERROR'}, "Could not read %s: %s" % (os.path.basename(path), error))
+			return {'CANCELLED'}
+
+		# A file that states its own voxel size has said what frame its numbers
+		# are in, which beats what the scene happens to be set to.
+		voxel_size = curve.voxel_size_um or self.voxel_size
+		voxels_per_unit = (
+			1000000.0 * context.scene.unit_settings.scale_length
+		) / voxel_size
+
+		name = curve.name
+		obj = bpy.data.objects.new(name, _umbilicus_mesh(name, curve, voxels_per_unit))
+		# Where it came from and what it was read with, so that a later reload
+		# or export does not have to be told again.
+		obj["velend_umbilicus_path"] = curve.path
+		obj["velend_umbilicus_voxel_size"] = voxel_size
+		context.scene.collection.objects.link(obj)
+		if bpy.ops.object.select_all.poll():
+			bpy.ops.object.select_all(action='DESELECT')
+		obj.select_set(True)
+		context.view_layer.objects.active = obj
+
+		self.report(
+			{'INFO'},
+			"Imported %d umbilicus points at %g um voxels%s"
+			% (
+				len(curve.positions),
+				voxel_size,
+				" (stated by the file)" if curve.voxel_size_um else "",
+			),
+		)
+		return {'FINISHED'}
+
+
 def _view_menu(self, context):
 	self.layout.operator(velend_OT_load_hires.bl_idname)
 
@@ -494,6 +582,10 @@ def _import_menu(self, context):
 	self.layout.operator(
 		velend_OT_import_tifxyz.bl_idname,
 		text="Volume Cartographer Surface (tifxyz)",
+	)
+	self.layout.operator(
+		velend_OT_import_umbilicus.bl_idname,
+		text="Scroll Umbilicus (umbilicus.json)",
 	)
 
 
@@ -504,6 +596,7 @@ def register():
 	bpy.utils.register_class(velend_OT_set_volpkg_volume)
 	bpy.utils.register_class(velend_OT_setup_scene)
 	bpy.utils.register_class(velend_OT_import_tifxyz)
+	bpy.utils.register_class(velend_OT_import_umbilicus)
 	bpy.types.VIEW3D_MT_view.append(_view_menu)
 	bpy.types.TOPBAR_MT_file_import.append(_import_menu)
 
@@ -511,6 +604,7 @@ def register():
 def unregister():
 	bpy.types.TOPBAR_MT_file_import.remove(_import_menu)
 	bpy.types.VIEW3D_MT_view.remove(_view_menu)
+	bpy.utils.unregister_class(velend_OT_import_umbilicus)
 	bpy.utils.unregister_class(velend_OT_import_tifxyz)
 	bpy.utils.unregister_class(velend_OT_setup_scene)
 	bpy.utils.unregister_class(velend_OT_set_volpkg_volume)
