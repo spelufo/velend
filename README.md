@@ -25,9 +25,12 @@ Point the extension at a scan in the Properties editor, under Scene > Velend:
 - Source URL (optional): the public HTTP(S) root of that same OME-Zarr dataset.
   Missing metadata and chunks download into Volume. Leave it blank to retain
   the existing behavior without mirror downloads.
-- Voxel Size: how wide a full resolution voxel is, in micrometers. It is filled
-  in from the volume's directory name when that names it, as in
-  `20250820131727-9.362um-1.2m-113keV-masked.zarr`.
+- Voxel Size: how wide a full resolution voxel of that volume is, in
+  micrometers. Shown rather than set: it is read off the open data metadata, or
+  the volume's directory name when that names it, as in
+  `20250820131727-9.362um-1.2m-113keV-masked.zarr`. A volume neither of them
+  states the size of is asked about, and the button beside the field is how to
+  correct either of them.
 
 The URL and local directory must identify the same dataset. "Choose from volpkg.json" fills the three fields in from a VC3D project: pick a `.volpkg.json`, then one of the volumes it lists. The volume's zarr path becomes the cache directory VC3D reads it through, under `~/.VC3D/remote_cache/open_data/volumes`, and its source URL the one VC3D fetches it from. It then works the same way VC3D does, downloading chunks to the same local zarr when missing, so either program's downloads count for the other.
 

@@ -20,8 +20,7 @@ _dirty = True
 _VERTEX_SOURCE = """
 void main() {
     vec4 world = volumeUniforms.modelMatrix * vec4(position, 1.0);
-    voxelCoord = (volumeUniforms.volumeTransform *
-        vec4(world.xyz * volumeUniforms.voxelsPerUnit, 1.0)).xyz;
+    voxelCoord = (volumeUniforms.worldToVoxels * vec4(world.xyz, 1.0)).xyz;
     gl_Position = volumeUniforms.viewProjectionMatrix * vec4(uv, 0.0, 1.0);
     // Behind UV edges/vertices, in front of the image.
     gl_Position.z = 0.5 * gl_Position.w;

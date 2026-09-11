@@ -12,12 +12,12 @@ Downloads into VC3D's cache stay within the budget its settings put on it, under
 
 File > Import > Volume Cartographer Surface (tifxyz) brings a segmentation in as a mesh. Point it at a surface directory, the one holding `x.tif`, `y.tif`, `z.tif` and `meta.json`, or at a folder of them such as VC3D's `patches/`, and every surface under it comes in at once.
 
-The surface's grid becomes a quad per cell, minus the cells its `mask.tif` takes out, with a UV map over the grid and any extra channel like `generations.tif` as a mesh attribute. Raise "Step" to bring a large segment in coarser, one grid point in every n. "Voxel Size" says what the surface's coordinates are in, and starts from the scene's own, so a segment lands inside the volume it was traced from and "Load High-Res Volume" renders the scan on it.
+The surface's grid becomes a quad per cell, minus the cells its `mask.tif` takes out, with a UV map over the grid and any extra channel like `generations.tif` as a mesh attribute. Raise "Step" to bring a large segment in coarser, one grid point in every n. "Voxel Size" says what the surface's coordinates are in, and starts from the voxel size of the volume being rendered, that being the likeliest one they were traced against, so a segment lands inside the volume it came from and "Load High-Res Volume" renders the scan on it.
 
 
 ## Umbilici
 
-File > Import > Umbilicus brings an `umbilicus.json`, or the `z, y, x` text form of it, in as a polyline running up the scroll's core. Its points are in full resolution voxels, and "Voxel Size" says whose: the scene's, unless the file states one of its own, which wins.
+File > Import > Umbilicus brings an `umbilicus.json`, or the `z, y, x` text form of it, in as a polyline running up the scroll's core. Its points are in full resolution voxels, and "Voxel Size" says whose: the volume being rendered, unless the file states one of its own, which wins.
 
 
 ## UV volume view
@@ -31,9 +31,11 @@ This currently uses the editable mesh, before modifiers. Overlapping UV faces ov
 
 A sample is often scanned more than once, and the open data metadata registers its volumes against each other: for each ordered pair of them, the matrix that takes a point in one's voxels into the other's. There is no space they all share and no canonical one among them, so it is always a pair.
 
-The scene's coordinates stay in the voxels of the volume it was set up against, and Voxel Size states how wide one of those is. Point it at another volume of the same sample and it renders that one through the matrix registered for the pair, so a cutting plane or an imported segment keeps showing the same place in the scroll -- at whatever resolution and orientation the new volume reconstructed it. The panel says which volume the scene is in whenever that is no longer the one being rendered.
+The scene's coordinates are metric, and sit in the frame of the volume it was set up against. Voxel Size states how wide a voxel of the volume being *rendered* is, which is what places that volume in those coordinates: a scan of 2 um voxels put beside one of 9 um is four and a half times the voxels across the same millimetre. Point the panel at another volume of the same sample and it renders that one through the matrix registered for the pair, so a cutting plane or an imported segment keeps showing the same place in the scroll -- at whatever resolution and orientation the new volume reconstructed it. The panel says which volume the scene is in, and how wide its voxels are, whenever that is no longer the one being rendered.
 
-A volume the metadata cannot relate to the scene's has nothing saying how the two sit against each other, so it becomes the scene's frame instead, the way the first volume loaded did: its own voxels, and its own voxel size. Anything already placed in the scene stays where it is, which is no longer where it was in the volume it came from.
+A volume the metadata cannot relate to the scene's has nothing saying how the two sit against each other, so it is placed on the only assumption there is to make about two scans of one object: same origin, same axes, each at its own voxel size. Nothing already in the scene moves or changes size, and the panel says the placement is a guess. Registering the pair later replaces the guess with the transform, without anything having been re-anchored in the meantime.
+
+Voxel Size is read rather than set: it comes from the metadata for a volume the catalogue lists, or from the volume's directory name when that names it. A volume neither states the size of is asked about when it loads -- the scene cannot place it otherwise -- and the button beside the field asks again, which is also how to correct a size read off a name that lies.
 
 A transform that has not reached the published metadata yet can be supplied through Preferences > Add-ons > velend > Extra Metadata, a JSON file shaped like `metadata.json` and merged over it. A direction it leaves out is taken from the opposite one inverted.
 

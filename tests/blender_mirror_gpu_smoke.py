@@ -20,7 +20,7 @@ bricks.SLOTS_PER_AXIS = {level: 1 for level in bricks.LEVELS}
 bricks.SLOT_COUNTS = {level: 1 for level in bricks.LEVELS}
 bricks.ATLAS_DIMS = {level: bricks.BRICK_SIZE for level in bricks.LEVELS}
 tmp = tempfile.TemporaryDirectory()
-root = Path(tmp.name)/'volume'
+root = Path(tmp.name)/'volume-9.362um.zarr'
 group = zarr.open_group(root, mode='w', zarr_format=2)
 group.attrs['multiscales'] = [{'datasets':[{'path':str(i)} for i in range(6)]}]
 for i in range(6):

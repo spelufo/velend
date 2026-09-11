@@ -3,10 +3,14 @@
 - Volume switching. Point the panel at another volume of the same sample and it
   renders that one through the transform the open data metadata registers for
   the pair, so cutting planes and imported segments keep showing the same place
-  in the scroll. A volume the metadata cannot relate to the scene's becomes the
-  scene's own frame instead, and the panel says so. Preferences > Add-ons >
-  velend > Extra Metadata supplies a transform the published metadata does not
-  have yet.
+  in the scroll. A volume the metadata cannot relate to the scene's is placed at
+  its own voxel size, sharing an origin and its axes with the scene's, which
+  leaves everything already placed where it is; the panel says the placement is
+  a guess. Preferences > Add-ons > velend > Extra Metadata supplies a transform
+  the published metadata does not have yet.
+- Voxel Size states the volume being rendered rather than the scene's own frame,
+  and is shown rather than set: read off the metadata or the volume's directory
+  name, and asked for when neither states it.
 - Frustum culling. Only the bricks inside a viewport's view frustum are
   streamed, so the resolution the streamer can afford goes to what is on
   screen. "Frustum Culling", in the panel, turns it off.

@@ -52,17 +52,15 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	# it waits for `view_draw`, where a GPU context is active.
 	pending_reset = False
 
-	# Level 0 voxels per Blender unit, set up by `ensure_grid`.
-	voxels_per_unit = 1.0
 	shape_xyz = None
-	# The affine taking the scene's own voxels into the loaded volume's, set up
-	# by `ensure_grid` alongside them. The scene's coordinates stay in the
-	# voxels of the volume it was set up against -- `ui` says which, and only
-	# re-anchors it to a volume the manifest cannot relate to that one -- so
-	# rendering another volume of the same sample means sampling it through the
-	# matrix registered for the pair. Identity while the two are the same
-	# volume, and while nothing relates them.
-	volume_transform = np.eye(4)
+	# The affine taking a Blender world point into the loaded volume's level 0
+	# voxels, set up by `ensure_grid`. The scene's coordinates are metric -- a
+	# Blender unit is `scale_length` metres -- and sit in the frame of the volume
+	# the scene was set up against, which `ui` names and states the voxel size
+	# of. `compute_world_to_voxels` is the three steps between the two: the
+	# scene's units into micrometers, the registration onto the volume being
+	# rendered, and that volume's own voxel size.
+	world_to_voxels = np.eye(4)
 
 	# Brick streaming. Residency and loader state are CPU only so the operator
 	# can retarget without a GPU context; the atlases own the textures.
@@ -166,16 +164,26 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 				len(volume), bricks.LEVELS[-1]))
 		return volume
 
-	@classmethod
-	def compute_voxels_per_unit(cls):
-		"""Level 0 voxels per Blender unit, from the scene's voxel size."""
-		scene = bpy.context.scene
-		# Full-res voxels are `resolution` µm across.
-		return (1000000.0 * scene.unit_settings.scale_length) / scene.velend.resolution
+	@staticmethod
+	def um_per_unit():
+		"""Micrometers to a Blender unit, from the scene's own unit settings."""
+		return 1000000.0 * bpy.context.scene.unit_settings.scale_length
 
 	@classmethod
-	def compute_volume_transform(cls):
-		"""The affine taking the scene's own voxels into the loaded volume's."""
+	def physical_transform(cls):
+		"""The affine taking a point in the frame the scene's coordinates are in
+		onto the volume being rendered, both frames in micrometers.
+
+		The metadata registers a sample's volumes pairwise in each other's
+		voxels, so the matrix for the pair is conjugated by the two voxel sizes
+		to have it say the same thing about micrometers instead.
+
+		Nothing registering the pair leaves the identity, which takes the two
+		volumes to share an origin and their axes: as much as can be assumed of
+		two scans of one object, and a guess that never resizes what the scene
+		already holds. Identity as well while the volume being rendered is the
+		one the scene is in, the pair being the same volume.
+		"""
 		settings = cls.settings()
 		matrix = metadata.volume_transform(
 			settings.scene_volume_id,
@@ -183,25 +191,44 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			# by the cache directory naming VC3D puts around it.
 			metadata.volume_id_for(settings.source_url, settings.volume_path),
 		)
-		return np.eye(4) if matrix is None else matrix
+		if matrix is None:
+			return np.eye(4)
+		scene_um = settings.scene_resolution or settings.resolution
+		loaded_um = settings.resolution or scene_um
+		physical = np.eye(4)
+		# Voxels of the scene's volume in, so a column is scaled by what one of
+		# them is worth in micrometers; voxels of the loaded volume out, so a row
+		# is scaled by what one of those is worth.
+		physical[:3, :3] = matrix[:3, :3] * (loaded_um / scene_um)
+		physical[:3, 3] = matrix[:3, 3] * loaded_um
+		return physical
 
 	@classmethod
-	def to_volume_voxels(cls, voxels):
-		"""Scene voxel coordinates into the loaded volume's, the way the vertex
-		shader takes them. One point or an (n, 3) array of them."""
-		matrix = cls.volume_transform
-		return voxels @ matrix[:3, :3].T + matrix[:3, 3]
+	def compute_world_to_voxels(cls):
+		"""The affine a world point reaches the loaded volume's level 0 voxels
+		through: the scene's units into micrometers, the registration above, and
+		then the voxel size of the volume being rendered."""
+		resolution = cls.settings().resolution or 1.0
+		matrix = cls.physical_transform()
+		matrix[:3, :3] *= cls.um_per_unit() / resolution
+		matrix[:3, 3] /= resolution
+		return matrix
 
 	@classmethod
-	def world_to_voxels(cls):
-		"""The affine taking a Blender world point to the loaded volume's voxels.
+	def compute_world_from_voxels(cls):
+		"""The way back, off the scene's fields rather than off what is loaded:
+		an importer places its points before anything has been rendered."""
+		try:
+			return np.linalg.inv(cls.compute_world_to_voxels())
+		except np.linalg.LinAlgError:
+			return np.eye(4)
 
-		The two steps `retarget` applies to the mesh positions, composed: the
-		scene's voxel size, and then the transform onto the loaded volume.
-		"""
-		scale = np.eye(4)
-		scale[:3, :3] *= cls.voxels_per_unit
-		return cls.volume_transform @ scale
+	@classmethod
+	def to_voxels(cls, world, matrix=None):
+		"""Blender world coordinates into the loaded volume's level 0 voxels, the
+		way the vertex shader takes them. One point or an (n, 3) array of them."""
+		matrix = cls.world_to_voxels if matrix is None else matrix
+		return world @ matrix[:3, :3].T + matrix[:3, 3]
 
 	@classmethod
 	def view_frusta(cls):
@@ -218,23 +245,22 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		"""
 		if not cls.settings().frustum_culling:
 			return []
-		to_voxels = cls.world_to_voxels()
 		margin = bricks.FRUSTUM_MARGIN_CHUNKS * bricks.BRICK_CORE
 		frusta = []
 		for instance in cls.live_instances:
 			matrix = instance.frustum_matrix
 			if matrix is None:
 				continue
-			planes = bricks.frustum_planes(matrix, to_voxels, margin)
+			planes = bricks.frustum_planes(matrix, cls.world_to_voxels, margin)
 			if planes is not None:
 				frusta.append(planes)
 		return frusta
 
 	@classmethod
-	def scene_voxel_bounds(cls):
-		"""The loaded volume's extent as a `(low, high)` pair of corners in the
-		scene's own voxels: the box its corners span brought back through
-		`volume_transform`.
+	def world_bounds(cls):
+		"""The loaded volume's extent as a `(low, high)` pair of corners in
+		Blender world coordinates: the box its own corners span, brought back
+		through `world_to_voxels`.
 
 		The volume need not sit square to the scene once transformed, so this
 		is the axis aligned box around it rather than the volume itself.
@@ -245,7 +271,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			for z in (0.0, shape[2])
 		])
 		try:
-			inverse = np.linalg.inv(cls.volume_transform)
+			inverse = np.linalg.inv(cls.world_to_voxels)
 		except np.linalg.LinAlgError:
 			return np.zeros(3), shape
 		corners = corners @ inverse[:3, :3].T + inverse[:3, 3]
@@ -290,7 +316,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.residencies = {}
 		cls.shapes_xyz = {}
 		cls.shape_xyz = None
-		cls.volume_transform = np.eye(4)
+		cls.world_to_voxels = np.eye(4)
 		cls.wanted = {level: frozenset() for level in bricks.LEVELS}
 		cls.pending_levels = {}
 		cls.empty_chunks = {level: set() for level in bricks.LEVELS}
@@ -317,7 +343,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		"""Reapply the voxel size to the grid already built, without rebuilding it."""
 		if not cls.residencies or cls.pending_reset:
 			return
-		cls.voxels_per_unit = cls.compute_voxels_per_unit()
+		cls.world_to_voxels = cls.compute_world_to_voxels()
 		cls.retarget_now()
 
 	@classmethod
@@ -371,8 +397,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		# it is read straight off the pyramid rather than out of `shapes_xyz`:
 		# `LEVELS` need not name it.
 		cls.shape_xyz = tuple(int(s) for s in reversed(volume[0].shape))
-		cls.voxels_per_unit = cls.compute_voxels_per_unit()
-		cls.volume_transform = cls.compute_volume_transform()
+		cls.world_to_voxels = cls.compute_world_to_voxels()
 		cls.residencies = {
 			level: bricks.Residency(
 				bricks.grid_dims(cls.shapes_xyz[level]), bricks.SLOT_COUNTS[level]
@@ -473,8 +498,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			struct VolumeUniforms {
 				mat4 viewProjectionMatrix;
 				mat4 modelMatrix;
-				mat4 volumeTransform;
-				vec3 voxelsPerUnit;
+				mat4 worldToVoxels;
 			};
 		""")
 		shader_info.uniform_buf(0, "VolumeUniforms", "volumeUniforms")
@@ -505,15 +529,13 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	@classmethod
 	def update_uniform_buffer(cls, view_projection_matrix, model_matrix):
-		# std140 lays out each mat4 as four vec4 columns. `vec3` has a 16-byte
-		# stride. The matrices are transposed on the way in: Blender writes them
-		# a row at a time, GLSL reads them a column at a time.
-		data = np.empty(52, dtype=np.float32)
+		# std140 lays out each mat4 as four vec4 columns. The matrices are
+		# transposed on the way in: Blender writes them a row at a time, GLSL
+		# reads them a column at a time.
+		data = np.empty(48, dtype=np.float32)
 		data[:16] = np.asarray(view_projection_matrix, dtype=np.float32).T.ravel()
 		data[16:32] = np.asarray(model_matrix, dtype=np.float32).T.ravel()
-		data[32:48] = np.asarray(cls.volume_transform, dtype=np.float32).T.ravel()
-		data[48:51] = cls.voxels_per_unit
-		data[51] = 0.0
+		data[32:48] = np.asarray(cls.world_to_voxels, dtype=np.float32).T.ravel()
 		buffer = gpu.types.Buffer('FLOAT', len(data), data)
 		if cls.uniform_buffer is None:
 			cls.uniform_buffer = gpu.types.GPUUniformBuf(buffer)
@@ -584,9 +606,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		# The chunk search runs in level 0 chunks, which `LEVELS` need not
 		# stream, so the grid comes from the volume's own shape.
 		dims = np.asarray(bricks.grid_dims(cls.shape_xyz), dtype=np.int64)
-		focus_voxel = cls.to_volume_voxels(
-			np.asarray(focus, dtype=np.float64) * cls.voxels_per_unit
-		)
+		focus_voxel = cls.to_voxels(np.asarray(focus, dtype=np.float64))
 		cls.last_focus_voxel = focus_voxel
 
 		# Search the full multilevel reach in L0 space. Each level takes its
@@ -619,7 +639,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			world = positions @ matrix[:3, :3].T + matrix[:3, 3]
 			# The chunks a triangle covers are the ones it covers in the loaded
 			# volume, which an affine leaves a triangle in all the same.
-			voxels = cls.to_volume_voxels(world * cls.voxels_per_unit)
+			voxels = cls.to_voxels(world)
 			chunks = bricks.chunks_near(voxels, indices, lo, hi, planes_list)
 			if len(chunks):
 				found.append(chunks)

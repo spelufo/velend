@@ -6,7 +6,6 @@ pair the default for new files.
 """
 
 import json
-import math
 import os
 import re
 import shlex
@@ -36,14 +35,10 @@ def resolution_from_path(path):
 	return float(match.group(1)) if match else None
 
 
-# The state a switch is put back to when it turns out to be one to ask about:
-# the fields and what the scene's coordinates mean, from before the change
-# being applied now. `None` when no check is waiting to run.
-_pending = None
-
-# Set while the fields are written by the check below rather than by whoever
-# is switching volumes, so that their update callback knows it is not one.
-_updating = False
+# The scene, by name, whose volume is waiting to be asked the voxel size of, or
+# None when nothing is waiting. By name, since a timer outlives whatever it was
+# handed.
+_pending_ask = None
 
 
 def _volume_resolution(settings, volume_id):
@@ -64,145 +59,98 @@ def _volume_resolution(settings, volume_id):
 	return None
 
 
-def _remember(settings):
-	"""Keep what the fields now name, so that a switch made from here can be
-	put back. Blender hands an update callback the new value only."""
-	settings.last_volume_path = settings.volume_path
-	settings.last_source_url = settings.source_url
-
-
 def _reopen(settings):
 	"""Take the volume the fields now name as the one to render."""
-	_remember(settings)
 	state.close_volume()
 	VolumeSamplerRenderEngine.reset()
 
 
-def _set_volume(settings, volume_path, source_url, scene_volume_id, resolution):
-	"""Put the fields, and what the scene's coordinates mean, at once: the way
-	they were before a switch, or the way a switch that was asked about and
-	confirmed leaves them."""
-	global _updating
-	_updating = True
-	try:
-		settings.volume_path = volume_path
-		settings.source_url = source_url
-		settings.scene_volume_id = scene_volume_id
-		settings.resolution = resolution
-	finally:
-		_updating = False
-	_reopen(settings)
+def _anchored(settings):
+	"""Whether the volume being rendered is the one the scene's coordinates are
+	in, in which case the two voxel sizes are the one number."""
+	return settings.scene_volume_id == metadata.volume_id_for(
+		settings.source_url, settings.volume_path
+	)
 
 
-def _watch_for_rescale(settings):
-	"""Keep what the scene means by a coordinate, and look on the next tick at
-	where this change has taken it.
+def set_resolution(settings, resolution):
+	"""State how wide a voxel of the volume being rendered is.
 
-	The fields are judged once they have settled rather than here: an operator
-	that sets both sets them one at a time, and the update callback sees each
-	on its own, with the other still naming the volume being left. What is
-	kept is the state from before the change being applied now -- the `last_`
-	fields only catch up once it is through.
+	The scene's own frame follows it while that volume is the one the scene is
+	in: the two are the same voxel then, and nothing else states its size.
+	Anything waiting to be asked has its answer in this.
 	"""
-	global _pending
-	if _pending is not None:
-		return
-	if settings.scene_volume_id and not (
-		settings.last_volume_path or settings.last_source_url
-	):
-		# A file saved before the two `last_` fields existed, so there is
-		# nothing to put a switch back to. `_reopen` fills them in on the way
-		# out of this change, so only the first switch in such a file goes
-		# through unasked.
-		return
-	# By name, since a timer outlives whatever it was handed.
-	_pending = (settings.id_data.name, (
-		settings.last_volume_path,
-		settings.last_source_url,
-		settings.scene_volume_id,
-		settings.resolution,
-	))
-	bpy.app.timers.register(_check_rescale, first_interval=0.0)
+	global _pending_ask
+	_pending_ask = None
+	# Assigning fires `_resolution_updated`, which reapplies both to the grid.
+	settings.resolution = resolution
+	if _anchored(settings):
+		settings.scene_resolution = resolution
 
 
-def _rescaling_switch(settings, previous):
-	"""The switch the fields now name, when making it has changed the size of
-	the scene's voxels with nothing to carry what is in the scene across.
-	None when it is nothing to ask about.
+def _ask_resolution(settings):
+	"""Ask how wide the volume's voxels are, on the next tick.
 
-	Everything in a scene is placed in the voxels of the volume the scene is
-	in. A volume registered against that one renders through the matrix for
-	the pair and leaves them alone; one that is not becomes the scene's own
-	frame, and only its voxels being another size makes that a move.
+	A timer, so that it runs once whoever is writing the fields is done with
+	them: an operator that sets both sets them one at a time, and the update
+	callback sees each on its own, with the other still naming the volume being
+	left -- which is a volume nothing is being asked about.
 	"""
-	volume_path, source_url, scene_volume_id, resolution = previous
-	if not scene_volume_id:
-		# The scene was in no volume's voxels, so nothing in it was placed
-		# against any.
-		return None
-	volume_id = metadata.volume_id_for(settings.source_url, settings.volume_path)
-	if volume_id == scene_volume_id:
-		return None
-	if metadata.volume_transform(scene_volume_id, volume_id) is not None:
-		return None
-	if math.isclose(settings.resolution, resolution, rel_tol=1e-6):
-		# The new volume's voxels are the size the scene was already in, or
-		# nothing states their size and the scene kept the one it had.
-		return None
-	return {
-		"volume_path": settings.volume_path,
-		"source_url": settings.source_url,
-		"volume_id": volume_id,
-		"resolution": settings.resolution,
-	}
-
-
-def _check_rescale():
-	"""Put such a switch back and ask about it instead. A timer, so that it
-	runs once whoever was writing the fields is done with them."""
-	global _pending
-	if _pending is None:
+	global _pending_ask
+	if _pending_ask is not None:
 		return
-	(scene_name, previous), _pending = _pending, None
+	_pending_ask = settings.id_data.name
+	bpy.app.timers.register(_check_resolution, first_interval=0.0)
+
+
+def _check_resolution():
+	global _pending_ask
+	scene_name, _pending_ask = _pending_ask, None
+	if scene_name is None:
+		# Answered while this was waiting, by whoever called `set_resolution`.
+		return
 	scene = bpy.data.scenes.get(scene_name)
 	if scene is None:
 		return
 	settings = scene.velend
-	target = _rescaling_switch(settings, previous)
-	if target is None:
+	volume_id = metadata.volume_id_for(settings.source_url, settings.volume_path)
+	resolution = _volume_resolution(settings, volume_id)
+	if resolution is not None:
+		# The fields settled on a volume that states its voxel size after all,
+		# or the catalogue naming it finished downloading in the meantime.
+		set_resolution(settings, resolution)
 		return
 	if bpy.app.background:
-		# No one to ask, and a script that set the fields meant to. Say what
-		# it did rather than standing in its way.
-		print("velend: nothing registers %s against %s, so the scene is now "
-			"in %g um voxels, from %g um" % (
-				target["volume_id"] or "the volume",
-				previous[2],  # the volume the scene was in
-				target["resolution"],
-				previous[3],  # and the size of its voxels
-			))
+		# No one to ask. Say what the volume is being placed by instead.
+		print("velend: nothing states the voxel size of %s, so it is placed at "
+			"%g um, the size last set" % (
+				volume_id or "the volume", settings.resolution))
 		return
-	_set_volume(settings, *previous)
-	bpy.ops.velend.confirm_volume_switch('INVOKE_DEFAULT', **target)
+	bpy.ops.velend.set_resolution('INVOKE_DEFAULT')
 
 
 def _volume_path_updated(self, context):
-	if _updating:
-		return
-	_watch_for_rescale(self)
 	volume_id = metadata.volume_id_for(self.source_url, self.volume_path)
-	if metadata.volume_transform(self.scene_volume_id, volume_id) is None:
-		# Nothing in the manifest relates the two, so nothing says how the new
-		# volume sits against the scene's coordinates. Its own voxels become
-		# them, the way the first volume loaded did.
+	if not self.scene_resolution:
+		# A file saved before the scene's frame stated a voxel size of its own,
+		# where Voxel Size was the frame's rather than the rendered volume's. A
+		# new file lands here too, with the property's default, which the volume
+		# being loaded is about to become the frame and overwrite.
+		self.scene_resolution = self.resolution
+	if not self.scene_volume_id:
+		# The scene is in no volume's frame yet, so the one being loaded becomes
+		# it. Once it has one it keeps it: a volume the metadata cannot relate to
+		# that one is placed by its own voxel size instead, which leaves what the
+		# scene already holds where it is and comes out right if the pair is
+		# registered later on.
 		self.scene_volume_id = volume_id
-	if self.scene_volume_id == volume_id:
-		resolution = _volume_resolution(self, volume_id)
-		if resolution is not None:
-			# Assigning fires `_resolution_updated` too, whose work the reset
-			# below redoes; harmless, as nothing is loaded until the next draw
-			# either way.
-			self.resolution = resolution
+	resolution = _volume_resolution(self, volume_id)
+	if resolution is not None:
+		set_resolution(self, resolution)
+	else:
+		# Nothing states how wide this volume's voxels are, and the scene cannot
+		# place it without that.
+		_ask_resolution(self)
 	_reopen(self)
 
 
@@ -301,13 +249,9 @@ def _volume_updated(self, context):
 	if volume is None or not volume.zarr_url:
 		return
 	# Assigning fires `_volume_path_updated`, which reopens the volume and
-	# reads the voxel size out of the URL. The manifest states it outright,
-	# so take it from there instead -- unless that update left the scene in
-	# another volume's voxels, which are the ones Voxel Size then states.
+	# takes its voxel size from the catalogue, this being a volume it lists.
 	self.source_url = ""
 	self.volume_path = volume.zarr_url
-	if volume.pixel_size_um and self.scene_volume_id == volume.id:
-		self.resolution = volume.pixel_size_um
 
 
 def _overlay_path_updated(self, context):
@@ -501,124 +445,55 @@ class velend_OT_reload_metadata(bpy.types.Operator):
 		return {'FINISHED'}
 
 
-class velend_OT_confirm_volume_switch(bpy.types.Operator):
-	bl_idname = "velend.confirm_volume_switch"
-	bl_label = "Switch Volume"
+class velend_OT_set_resolution(bpy.types.Operator):
+	bl_idname = "velend.set_resolution"
+	bl_label = "Set Voxel Size"
 	bl_description = (
-		"Take the scene into the voxels of a volume nothing registers against "
-		"the one the scene is in"
+		"State how wide a full resolution voxel of the volume being rendered is. "
+		"The scene asks when neither the metadata nor the volume's directory "
+		"name states it, and this is how to correct what either of them says"
 	)
 	bl_options = {'INTERNAL'}
 
-	# The switch `_check_rescale` put back, waiting on the answer.
-	volume_path: bpy.props.StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
-	source_url: bpy.props.StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
-	volume_id: bpy.props.StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
-	resolution: bpy.props.FloatProperty(options={'SKIP_SAVE', 'HIDDEN'})
+	resolution: bpy.props.FloatProperty(
+		name="Voxel Size",
+		description="Width of a full resolution voxel, in micrometers",
+		default=9.362,
+		min=1e-6,
+		soft_max=100.0,
+		precision=3,
+		options={'SKIP_SAVE'},
+	)
 
 	def invoke(self, context, event):
+		# What the scene is placing the volume by now, which is the last size
+		# set: the one to correct, and the one to keep by pressing Return.
+		self.resolution = context.scene.velend.resolution
 		return context.window_manager.invoke_props_dialog(
-			self,
-			width=460,
-			title="Volumes Not Registered",
-			confirm_text="Switch Anyway",
-			# Keeping the scene as it is is the safe answer, so it is the one
-			# Return takes.
-			cancel_default=True,
+			self, width=440, title="Voxel Size", confirm_text="Use This Size"
 		)
 
 	def draw(self, context):
 		settings = context.scene.velend
-		layout = self.layout
-		column = layout.column()
-		# Read every redraw rather than once: a transform written into the
-		# extra metadata and reloaded from here changes the answer, and what
-		# the buttons below then do.
-		registered = metadata.volume_transform(
-			settings.scene_volume_id, self.volume_id
-		) is not None
+		column = self.layout.column()
+		volume_id = metadata.volume_id_for(settings.source_url, settings.volume_path)
 		# One label per line: the dialog does not wrap what it is given.
-		if registered:
-			column.label(
-				text="%s is registered against %s now." % (
-					self.volume_id or "The volume", settings.scene_volume_id
-				),
-				icon='CHECKMARK',
-			)
-			column.label(text=(
-				"Switching renders it through that transform, so the scene "
-				"stays in"
-			))
-			column.label(text=(
-				"%g um voxels and nothing already placed moves."
-				% settings.resolution
-			))
-			column.separator()
-		else:
-			column.label(
-				text="Nothing states how %s sits against %s." % (
-					self.volume_id or "the volume", settings.scene_volume_id
-				),
-				icon='ERROR',
-			)
-			column.label(text=(
-				"Switching puts the scene in %g um voxels, from %g um, so "
-				"meshes," % (self.resolution, settings.resolution)
-			))
-			column.label(text=(
-				"the cursor and everything else already placed would move and "
-				"change size."
-			))
-			column.separator()
-			column.label(text=(
-				"A transform for the pair, written into the extra metadata, "
-				"would carry"
-			))
-			column.label(text="them across instead.")
-		# Both buttons stay put whichever of the two it is: they are what the
-		# dialog is left open to use, and one that moves out from under the
-		# pointer between redraws is one pressed by accident.
-		edit = column.operator("velend.edit_metadata_overrides", icon='TEXT')
-		edit.from_volume_id = settings.scene_volume_id
-		edit.to_volume_id = self.volume_id
-		# The scale the pair would differ by if that were all they differ by.
-		edit.scale = settings.resolution / self.resolution if self.resolution else 1.0
-		reload = column.operator("velend.reload_metadata", icon='FILE_REFRESH')
-		reload.from_volume_id = settings.scene_volume_id
-		reload.to_volume_id = self.volume_id
+		column.label(
+			text="Nothing states how wide the voxels of %s are." % (
+				volume_id or "this volume"),
+			icon='ERROR',
+		)
+		column.label(text=(
+			"A directory named like 20250820131727-9.362um-1.2m-113keV.zarr "
+			"states it,"
+		))
+		column.label(text="and so does the open data metadata for a volume it lists.")
+		column.separator()
+		column.prop(self, "resolution")
 
 	def execute(self, context):
-		settings = context.scene.velend
-		if metadata.volume_transform(settings.scene_volume_id, self.volume_id) is not None:
-			# A transform for the pair turned up while the dialog stood open.
-			# There is nothing left to confirm: the scene stays where it is and
-			# the new volume renders through the matrix, as it would have had
-			# the transform been there all along.
-			_set_volume(
-				settings,
-				self.volume_path,
-				self.source_url,
-				settings.scene_volume_id,
-				settings.resolution,
-			)
-			return {'FINISHED'}
-		_set_volume(
-			settings,
-			self.volume_path,
-			self.source_url,
-			# The scene takes the new volume's voxels for its own, there being
-			# nothing that relates them to the ones it was in.
-			self.volume_id,
-			self.resolution or settings.resolution,
-		)
+		set_resolution(context.scene.velend, self.resolution)
 		return {'FINISHED'}
-
-	def cancel(self, context):
-		# The fields are already back where they were, so turning the switch
-		# down takes nothing. The extra metadata is read again anyway, in case
-		# the dialog was dismissed after editing it rather than reloading it
-		# from here: cheap, and it lets a second try find the transform.
-		metadata.load_in_background()
 
 
 class VelendSceneSettings(bpy.types.PropertyGroup):
@@ -651,10 +526,10 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 	scene_volume_id: bpy.props.StringProperty(
 		name="Scene Volume",
 		description=(
-			"The volume whose voxels the scene's own coordinates are in, which "
-			"is also what Voxel Size states. Another volume of the same sample "
-			"renders through the transform the metadata registers for the pair, "
-			"so that meshes placed against one stay put in the other"
+			"The volume whose frame the scene's own coordinates are in. Another "
+			"volume of the same sample renders through the transform the "
+			"metadata registers for the pair, so that meshes placed against one "
+			"stay put in the other"
 		),
 		options=set(),
 	)
@@ -664,24 +539,32 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		default="",
 		update=_volume_path_updated,
 	)
-	last_volume_path: bpy.props.StringProperty(options={'HIDDEN'})
-	last_source_url: bpy.props.StringProperty(
-		# What the two fields above last named and we let through, so a switch
-		# the user is asked about and turns down can be put back. Kept with the
-		# .blend rather than in the module, which a script reload empties.
-		options={'HIDDEN'},
-	)
 	resolution: bpy.props.FloatProperty(
 		name="Voxel Size",
 		description=(
-			"Width of a full resolution voxel of the volume the scene's "
-			"coordinates are in, in micrometers. Filled in from that volume's "
-			"directory name when it names it"
+			"Width of a full resolution voxel of the volume being rendered, in "
+			"micrometers. Taken from the open data metadata for a volume it "
+			"lists, or from the volume's directory name when that names it, and "
+			"asked for when neither states it. It says where in the scan the "
+			"scene's coordinates fall, so it is read rather than set"
 		),
 		default=9.362,
 		min=1e-6,
 		soft_max=100.0,
 		precision=3,
+		update=_resolution_updated,
+	)
+	scene_resolution: bpy.props.FloatProperty(
+		# How wide a voxel of Scene Volume is, which with it is what a
+		# coordinate in this scene means. Left behind by a switch to a volume of
+		# another voxel size, which is what keeps everything already placed
+		# where it is. Zero in a file saved before the scene's frame stated a
+		# size of its own; `_volume_path_updated` fills it in.
+		name="Scene Voxel Size",
+		default=0.0,
+		min=0.0,
+		precision=3,
+		options={'HIDDEN'},
 		update=_resolution_updated,
 	)
 	frustum_culling: bpy.props.BoolProperty(
@@ -737,7 +620,14 @@ class SCENE_PT_velend(bpy.types.Panel):
 			column.separator()
 		column.prop(settings, "volume_path")
 		column.prop(settings, "source_url")
-		column.prop(settings, "resolution")
+		# What the volume being rendered states about itself rather than
+		# something to set, so it is shown and not edited. The button beside it
+		# is for a volume that states nothing, and for correcting a bad guess.
+		row = column.row(align=True)
+		field = row.row()
+		field.enabled = False
+		field.prop(settings, "resolution")
+		row.operator("velend.set_resolution", text="", icon='GREASEPENCIL')
 
 		# Fills the three fields above in from a VC3D project, so it sits with
 		# them rather than with the buttons that act on what they name.
@@ -750,13 +640,37 @@ class SCENE_PT_velend(bpy.types.Panel):
 
 		status, icon = VolumeSamplerRenderEngine.status()
 		layout.label(text=status, icon=icon)
-		if settings.scene_volume_id and settings.scene_volume_id != metadata.volume_id_for(
-			settings.source_url, settings.volume_path
-		):
-			layout.label(
-				text="Scene is in %s voxels" % settings.scene_volume_id,
+		volume_id = metadata.volume_id_for(settings.source_url, settings.volume_path)
+		if settings.scene_volume_id and settings.scene_volume_id != volume_id:
+			# Short lines: the panel is narrow at its default width, and a label
+			# that does not fit is truncated rather than wrapped.
+			box = layout.box()
+			box.label(
+				text="Scene is in %s" % settings.scene_volume_id,
 				icon='ORIENTATION_LOCAL',
 			)
+			box.label(text="at %g um voxels" % settings.scene_resolution)
+			if metadata.volume_transform(settings.scene_volume_id, volume_id) is None:
+				# Rendering it anyway, on the only assumption there is to make
+				# about two scans of one object. Saying so is the point: it is a
+				# guess, and the buttons are how to replace it with a transform.
+				box.separator()
+				box.label(text="Nothing registers the two.", icon='ERROR')
+				box.label(text="Placed as if they shared an")
+				box.label(text="origin and their axes.")
+				buttons = box.row(align=True)
+				edit = buttons.operator("velend.edit_metadata_overrides", icon='TEXT')
+				edit.from_volume_id = settings.scene_volume_id
+				edit.to_volume_id = volume_id
+				# The scale the pair would differ by if that were all they
+				# differ by, the metadata stating transforms in voxels.
+				edit.scale = (
+					settings.scene_resolution / settings.resolution
+					if settings.resolution else 1.0
+				)
+				reload = buttons.operator("velend.reload_metadata", icon='FILE_REFRESH')
+				reload.from_volume_id = settings.scene_volume_id
+				reload.to_volume_id = volume_id
 
 		# A view option rather than something the volume is loaded through, so
 		# it sits with the streaming controls and not with the fields above.
@@ -771,21 +685,49 @@ class SCENE_PT_velend(bpy.types.Panel):
 		row.operator("velend.reload_volume", text="", icon='FILE_REFRESH')
 
 
+@bpy.app.handlers.persistent
+def _load_post(_file_path):
+	"""Bring a file saved before the scene's frame stated a voxel size of its
+	own up to date.
+
+	Opening a file writes the fields without going through their update
+	callbacks, so this is the only thing that notices. Voxel Size meant the
+	frame's voxel size in such a file, which is what it still means here; what
+	it means now, the voxel size of the volume being rendered, is read off that
+	volume the way loading it would.
+	"""
+	for scene in bpy.data.scenes:
+		settings = scene.velend
+		if settings.scene_resolution:
+			continue
+		if not (settings.volume_path or settings.source_url):
+			continue
+		settings.scene_resolution = settings.resolution
+		resolution = _volume_resolution(settings, metadata.volume_id_for(
+			settings.source_url, settings.volume_path))
+		if resolution is not None:
+			settings.resolution = resolution
+
+
 def register():
 	bpy.utils.register_class(VelendPreferences)
 	bpy.utils.register_class(velend_OT_edit_metadata_overrides)
 	bpy.utils.register_class(velend_OT_reload_metadata)
-	bpy.utils.register_class(velend_OT_confirm_volume_switch)
+	bpy.utils.register_class(velend_OT_set_resolution)
 	bpy.utils.register_class(VelendSceneSettings)
 	bpy.utils.register_class(SCENE_PT_velend)
 	bpy.types.Scene.velend = bpy.props.PointerProperty(type=VelendSceneSettings)
+	if _load_post not in bpy.app.handlers.load_post:
+		bpy.app.handlers.load_post.append(_load_post)
 
 
 def unregister():
+	if _load_post in bpy.app.handlers.load_post:
+		bpy.app.handlers.load_post.remove(_load_post)
 	del bpy.types.Scene.velend
 	bpy.utils.unregister_class(SCENE_PT_velend)
 	bpy.utils.unregister_class(VelendSceneSettings)
-	bpy.utils.unregister_class(velend_OT_confirm_volume_switch)
+	bpy.utils.unregister_class(velend_OT_set_resolution)
 	bpy.utils.unregister_class(velend_OT_reload_metadata)
 	bpy.utils.unregister_class(velend_OT_edit_metadata_overrides)
 	bpy.utils.unregister_class(VelendPreferences)

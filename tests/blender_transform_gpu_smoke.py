@@ -1,9 +1,9 @@
 """Run in foreground Blender with --factory-startup --python; quits after testing.
 
-Draws the volume shader into an offscreen buffer with and without a volume
-transform, and checks the drawing moved by exactly what the matrix says. That
-is also what pins the uniform block's layout down: the vector after the
-matrices has to still land where the shader reads it.
+Draws the volume shader into an offscreen buffer with and without a shift in
+`world_to_voxels`, and checks the drawing moved by exactly what the matrix
+says. That is also what pins the uniform block's layout down: the matrix has to
+still land where the shader reads it.
 
 Uses a temporary synthetic volume, without saving preferences.
 VELEND_TEST_DEPS optionally points at unpacked wheels.
@@ -26,7 +26,8 @@ for mod in velend._modules:
 # The volume is one level 0 chunk across, so streaming its single brick in is
 # all it takes to have the whole quad sample through the level 0 atlas.
 SIZE = 64
-# One Blender unit per level 0 voxel, so that the numbers below are both.
+# One Blender unit per level 0 voxel, so that the numbers below are both. The
+# directory names it too, so the scene has nothing to ask about.
 VOXEL_SIZE_UM = 1000000.0
 # The quad, in world units: a square across the x/y gradient at a fixed depth.
 SPAN = float(SIZE)
@@ -40,7 +41,7 @@ SHIFT_PIXELS = SHIFT / SPAN * WIDTH
 COLUMNS = (10, 45, 95, 145)
 
 tmp = tempfile.TemporaryDirectory()
-root = Path(tmp.name) / 'volume'
+root = Path(tmp.name) / 'volume-1000000um.zarr'
 group = zarr.open_group(root, mode='w', zarr_format=2)
 group.attrs['multiscales'] = [{'datasets': [{'path': str(i)} for i in range(6)]}]
 # A ramp along x, bright enough everywhere that no fragment is discarded.
@@ -66,7 +67,7 @@ CORNERS = [(0., 0., 0.), (1., 0., 0.), (1., 1., 0.), (0., 1., 0.)]
 
 def draw(offscreen, transform):
     """The shader's output over the quad, as a (height, width) array."""
-    E.volume_transform = transform
+    E.world_to_voxels = transform
     batch = batch_for_shader(E.shader, 'TRIS', {"position": CORNERS}, indices=[(0, 1, 2), (0, 2, 3)])
     with offscreen.bind():
         framebuffer = gpu.state.active_framebuffer_get()
@@ -95,7 +96,8 @@ def tick():
         if E.get_volume() is None: return .1
         E.ensure_gpu_resources()
         assert E.shader is not None, E.status()
-        assert E.voxels_per_unit == 1.0, E.voxels_per_unit
+        assert np.allclose(E.compute_world_to_voxels(), np.eye(4)), \
+            E.compute_world_to_voxels()
 
         # The quad covers the volume's only level 0 chunk. Ask for it directly
         # rather than through `retarget`, which would need scene geometry.

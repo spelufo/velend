@@ -120,7 +120,7 @@ assert visible((0.0, 0.0, 50.0)) == [True]
 
 with tempfile.TemporaryDirectory() as tmp:
     settings = bpy.context.scene.velend
-    settings.volume_path = str(write_volume(Path(tmp) / 'volume.zarr'))
+    settings.volume_path = str(write_volume(Path(tmp) / 'volume-1000000um.zarr'))
     deadline = time.monotonic() + 30
     while E.get_volume() is None:
         assert time.monotonic() < deadline, E.status()
@@ -130,8 +130,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # One Blender unit per level 0 voxel, so the assertions can be read in
     # chunk coordinates directly.
     settings.resolution = 1000000.0
-    E.voxels_per_unit = E.compute_voxels_per_unit()
-    assert abs(E.voxels_per_unit - 1.0) < 1e-9, E.voxels_per_unit
+    E.world_to_voxels = E.compute_world_to_voxels()
+    assert abs(E.world_to_voxels[0, 0] - 1.0) < 1e-9, E.world_to_voxels
     assert E.shape_xyz == (SIZE, SIZE, SIZE), E.shape_xyz
 
     # A sheet across the whole volume, seen from close up by a narrow camera

@@ -1,10 +1,10 @@
 """Run with Blender --background --factory-startup --python-exit-code 1 --python.
 
-Switching to a volume nothing registers against the one the scene is in: which
-of those switches is one to ask about, since it changes the size of the voxels
-everything in the scene is placed in, and what putting one back and confirming
-one do. Temporary data only; VELEND_TEST_DEPS may point at unpacked dependency
-wheels.
+A volume nothing registers against the one the scene is in: it is placed by its
+own voxel size, on the assumption that the two share an origin and their axes,
+and the panel offers writing the missing transform into the extra metadata and
+reading it back in. Temporary data only; VELEND_TEST_DEPS may point at unpacked
+dependency wheels.
 """
 import sys
 from pathlib import Path
@@ -66,6 +66,14 @@ def load(path):
     wait()
 
 
+def scale(um):
+    """What `world_to_voxels` is when nothing but the voxel size separates the
+    scene's coordinates from the volume's. What a Blender unit is worth in
+    micrometers comes from the scene, which "Setup Scene for Volume" changes.
+    """
+    return np.diag([E.um_per_unit() / um] * 3 + [1.0])
+
+
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     (root / 'manifest.json').write_text(json.dumps(manifest()))
@@ -73,73 +81,25 @@ with tempfile.TemporaryDirectory() as tmp:
     volume_a = write_volume(root / (A + '-3.240um.zarr'), 4)
     volume_b = write_volume(root / (B + '-7.910um.zarr'), 8)
     volume_c = write_volume(root / (C + '-2.000um.zarr'), 4)
-    # Unregistered like C, and named as the size the scene is already in.
-    same = write_volume(root / 'someone-elses-3.240um.zarr', 4)
     settings = bpy.context.scene.velend
 
-    # The scene is in A's voxels, and nothing relates C to them.
+    # The scene is in A's frame, and nothing relates C to it.
     load(volume_a)
     assert settings.scene_volume_id == A, settings.scene_volume_id
-    assert abs(settings.resolution - 3.240) < 1e-6, settings.resolution
-    before = (settings.last_volume_path, settings.last_source_url,
-              settings.scene_volume_id, settings.resolution)
+    assert abs(settings.scene_resolution - 3.240) < 1e-6, settings.scene_resolution
 
-    # So switching to C is a switch to ask about: it took the scene from A's
-    # 3.240 um voxels into C's 2 um ones with nothing to carry the scene's own
-    # contents across.
+    # So C is placed by its own voxel size, and the scene stays in A's frame:
+    # nothing in it moves, and Voxel Size states the volume being rendered
+    # while Scene Voxel Size still states what a coordinate means.
     load(volume_c)
-    assert settings.scene_volume_id == C, settings.scene_volume_id
-    assert abs(settings.resolution - 2.0) < 1e-6, settings.resolution
-    target = ui._rescaling_switch(settings, before)
-    assert target == {'volume_path': str(volume_c), 'source_url': '',
-                      'volume_id': C, 'resolution': settings.resolution}, target
-
-    # Putting it back is what the dialog's Cancel leaves behind.
-    ui._set_volume(settings, *before)
-    wait()
-    assert settings.volume_path == str(volume_a), settings.volume_path
     assert settings.scene_volume_id == A, settings.scene_volume_id
-    assert abs(settings.resolution - 3.240) < 1e-6, settings.resolution
-    assert np.allclose(E.volume_transform, np.eye(4)), E.volume_transform
-
-    # A volume of the same voxel size is nothing to ask about: unregistered or
-    # not, the scene keeps meaning what it meant.
-    load(same)
-    assert ui._rescaling_switch(settings, before) is None
-    assert settings.scene_volume_id == '', settings.scene_volume_id
-    assert abs(settings.resolution - 3.240) < 1e-6, settings.resolution
-
-    # Nor is one the sample registers against the volume the scene is in: the
-    # scene stays where it is and the matrix does the moving.
-    load(volume_a)
-    before = (settings.last_volume_path, settings.last_source_url,
-              settings.scene_volume_id, settings.resolution)
-    load(volume_b)
-    assert settings.scene_volume_id == A, settings.scene_volume_id
-    assert ui._rescaling_switch(settings, before) is None
-
-    # Nor is a scene in no volume's voxels: they become the first one loaded.
-    ui._set_volume(settings, str(volume_a), '', '', 3.240)
-    load(volume_c)
-    assert ui._rescaling_switch(
-        settings, (str(volume_a), '', '', 3.240)) is None
-
-    # Answering the dialog takes the scene into C's voxels, as the fields
-    # having named it would have.
-    ui._set_volume(settings, str(volume_a), '', A, 3.240)
-    assert bpy.ops.velend.confirm_volume_switch(
-        'EXEC_DEFAULT', volume_path=str(volume_c), source_url='',
-        volume_id=C, resolution=2.0,
-    ) == {'FINISHED'}
-    wait()
-    assert settings.volume_path == str(volume_c), settings.volume_path
-    assert settings.last_volume_path == str(volume_c), settings.last_volume_path
-    assert settings.scene_volume_id == C, settings.scene_volume_id
     assert abs(settings.resolution - 2.0) < 1e-6, settings.resolution
-    assert np.allclose(E.volume_transform, np.eye(4)), E.volume_transform
+    assert abs(settings.scene_resolution - 3.240) < 1e-6, settings.scene_resolution
+    assert np.allclose(E.physical_transform(), np.eye(4)), E.physical_transform()
+    assert np.allclose(E.world_to_voxels, scale(2.0)), E.world_to_voxels
 
-    # The scaffold the dialog's third button starts the file off with states
-    # the missing pair without dropping the pair the catalogue already had.
+    # The scaffold the panel's first button starts the extra metadata off with
+    # states the missing pair without dropping the pair the catalogue had.
     overlay = root / 'overrides.json'
     ui._write_overlay_scaffold(str(overlay), A, C, 3.240 / 2.0)
     assert metadata.load(
@@ -149,7 +109,13 @@ with tempfile.TemporaryDirectory() as tmp:
     ), metadata.volume_transform(A, C)
     assert metadata.volume_transform(A, B) is not None
 
-    # And the button itself writes it and hands it to $EDITOR.
+    # And it is the transform the pair was being placed by all along: the
+    # voxels differ by their sizes alone, which in micrometers is no transform.
+    E.rescale()
+    assert np.allclose(E.physical_transform(), np.eye(4)), E.physical_transform()
+    assert np.allclose(E.world_to_voxels, scale(2.0)), E.world_to_voxels
+
+    # The button itself writes the file and hands it to $EDITOR.
     written = root / 'from-the-button.json'
     ui._overlay_file = lambda: str(written)
     os.environ['EDITOR'] = '/usr/bin/true'
@@ -157,31 +123,37 @@ with tempfile.TemporaryDirectory() as tmp:
         from_volume_id=A, to_volume_id=C, scale=1.62) == {'FINISHED'}
     assert json.loads(written.read_text())['samples']['PHercTest']
 
-    # The whole round trip the dialog is there for: the scene is in A's
-    # voxels, C is not registered against them, the transform is written into
-    # the extra metadata, and the button reads it back in without waiting for
-    # the editor.
+    # The whole round trip the two buttons are there for: the scene is in A's
+    # frame, C is not registered against it, a transform is written into the
+    # extra metadata by hand, and the second button reads it back in without
+    # waiting for the editor.
     metadata.overlay_path = lambda: str(written)
     metadata.cache_path = lambda: str(root / 'manifest.json')
     assert metadata.load(str(root / 'manifest.json'), refresh=False)
     assert metadata.volume_transform(A, C) is None
-    ui._set_volume(settings, str(volume_a), '', A, 3.240)
+    hand_written = json.loads(written.read_text())
+    hand_written['samples']['PHercTest']['sample']['properties'][
+        'volume_transforms'] = [{'from_volume_id': A, 'transforms': [
+            {'to_volume_id': C, 'matrix': [
+                [1.62, 0.0, 0.0, 4.0], [0.0, 1.62, 0.0, 0.0],
+                [0.0, 0.0, 1.62, 0.0]]}]}]
+    written.write_text(json.dumps(hand_written))
     assert bpy.ops.velend.reload_metadata(
         from_volume_id=A, to_volume_id=C) == {'FINISHED'}
     assert metadata.volume_transform(A, C) is not None
 
-    # Confirming then makes the ordinary switch, through the transform: the
-    # scene stays in A's voxels and the volume renders through the matrix.
-    assert bpy.ops.velend.confirm_volume_switch(
-        'EXEC_DEFAULT', volume_path=str(volume_c), source_url='',
-        volume_id=C, resolution=2.0,
-    ) == {'FINISHED'}
-    wait()
-    assert settings.volume_path == str(volume_c), settings.volume_path
+    # From then on C renders through it: four of its voxels along x, which is
+    # what the matrix translates by, on top of the placement it had.
+    E.rescale()
+    physical = E.physical_transform()
+    assert np.allclose(physical[:3, :3], np.eye(3)), physical
+    assert np.allclose(physical[:3, 3], [8.0, 0.0, 0.0]), physical
+    expected = scale(2.0)
+    expected[:3, 3] = [4.0, 0.0, 0.0]
+    assert np.allclose(E.world_to_voxels, expected), E.world_to_voxels
+    # And the scene is still in A's frame, at A's voxel size.
     assert settings.scene_volume_id == A, settings.scene_volume_id
-    assert abs(settings.resolution - 3.240) < 1e-6, settings.resolution
-    assert np.allclose(
-        E.volume_transform, np.diag([1.62, 1.62, 1.62, 1.0])), E.volume_transform
+    assert abs(settings.scene_resolution - 3.240) < 1e-6, settings.scene_resolution
 
     # A file half written is worth hearing about, rather than merging what can
     # be read of it and carrying on.

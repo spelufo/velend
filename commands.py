@@ -4,10 +4,10 @@ import os
 import bpy
 import numpy as np
 
-from . import metadata
 from . import state
 from . import tifxyz
 from . import umbilicus
+from . import ui
 from . import volpkg
 from .renderer import VolumeSamplerRenderEngine
 
@@ -202,15 +202,10 @@ class velend_OT_set_volpkg_volume(bpy.types.Operator):
 		settings.source_url = volume.url
 		settings.volume_path = volume.path
 		# The project states the voxel size outright, which beats the guess the
-		# assignments above made from the directory's name. It says how wide a
-		# voxel of this volume is, so it only applies while the scene's own
-		# coordinates are still in them: a transform onto another volume of the
-		# sample carries the change of voxel size with it.
-		anchored = settings.scene_volume_id == metadata.volume_id_for(
-			settings.source_url, settings.volume_path
-		)
-		if volume.resolution_um and anchored:
-			settings.resolution = volume.resolution_um
+		# assignments above made from the directory's name, and answers the
+		# dialog they may have queued for a directory that names none.
+		if volume.resolution_um:
+			ui.set_resolution(settings, volume.resolution_um)
 
 		if volume.remote and not volume.cached:
 			self.report({'INFO'}, "%s streams into %s" % (volume.name, volume.path))
@@ -359,14 +354,14 @@ class velend_OT_setup_scene(bpy.types.Operator):
 		scene.render.engine = engine.bl_idname
 		_setup_viewports(context)
 
-		engine.voxels_per_unit = engine.compute_voxels_per_unit()
+		engine.world_to_voxels = engine.compute_world_to_voxels()
 		engine.ensure_grid()
-		# In the scene's own voxels, which are the loaded volume's unless the
-		# scene was set up against another volume of the same sample and is
-		# rendering this one through the transform between the two.
-		low, high = engine.scene_voxel_bounds()
-		extents = [size / engine.voxels_per_unit for size in high - low]
-		center = [middle / engine.voxels_per_unit for middle in (low + high) / 2.0]
+		# The volume's own box, in the scene's coordinates: those of the volume
+		# it was set up against, which is this one unless it is being rendered
+		# through the transform registered between the two.
+		low, high = engine.world_bounds()
+		extents = list(high - low)
+		center = list((low + high) / 2.0)
 		planes = []
 		for name, rotation, (local_x, local_y) in _PLANE_SPECS:
 			plane = _ensure_plane(scene, name)
@@ -391,10 +386,29 @@ class velend_OT_setup_scene(bpy.types.Operator):
 		return {'FINISHED'}
 
 
-def _surface_mesh(name, surface, voxels_per_unit):
+def _placement(context, voxel_size):
+	"""Takes points in voxels `voxel_size` micrometers wide into Blender units.
+
+	A file states its coordinates in the voxels of the volume it was made
+	against, most likely the one being rendered, so they are read as that
+	volume's and brought back the way the renderer takes the scene's coordinates
+	to it. A scene in another volume's frame gets them through the transform
+	registered for the pair, rather than as if the two were the same volume.
+	"""
+	matrix = VolumeSamplerRenderEngine.compute_world_from_voxels()
+	scale = voxel_size / (context.scene.velend.resolution or voxel_size)
+
+	def place(points):
+		voxels = points * scale
+		return (voxels @ matrix[:3, :3].T + matrix[:3, 3]).astype(np.float32)
+
+	return place
+
+
+def _surface_mesh(name, surface, place):
 	"""A quad mesh of the surface, in Blender units."""
 	mesh = bpy.data.meshes.new(name)
-	positions = (surface.positions / voxels_per_unit).astype(np.float32)
+	positions = place(surface.positions)
 	quads = surface.quads
 	loops = quads.size
 	# The grid is far too big to go through `from_pydata`: the mesh is sized
@@ -419,10 +433,10 @@ def _surface_mesh(name, surface, voxels_per_unit):
 	return mesh
 
 
-def _link_surface(context, surface, voxels_per_unit, step, voxel_size):
+def _link_surface(context, surface, place, step, voxel_size):
 	"""Build the surface's object and put it in the scene, selected."""
 	name = surface.uuid
-	obj = bpy.data.objects.new(name, _surface_mesh(name, surface, voxels_per_unit))
+	obj = bpy.data.objects.new(name, _surface_mesh(name, surface, place))
 	# Where it came from and what it was read with, so that a later reload or
 	# export does not have to be told again.
 	obj["velend_tifxyz_path"] = surface.path
@@ -466,8 +480,8 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 		description=(
 			"Width of a full resolution voxel, in micrometers. Surface "
 			"coordinates are in voxels of the volume they were segmented from, "
-			"so this places them in the scene. Filled in from the scene's own "
-			"voxel size"
+			"so this places them in the scene. Filled in from the voxel size of "
+			"the volume being rendered, which is the likeliest one"
 		),
 		default=9.362,
 		min=1e-6,
@@ -489,7 +503,7 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 	)
 
 	def invoke(self, context, event):
-		# The scene's volume is the one a surface most likely belongs to.
+		# The volume being rendered is the one a surface most likely belongs to.
 		self.voxel_size = context.scene.velend.resolution
 		context.window_manager.fileselect_add(self)
 		return {'RUNNING_MODAL'}
@@ -512,9 +526,7 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 			self.report({'ERROR'}, "No tifxyz surface in %s" % directory)
 			return {'CANCELLED'}
 
-		voxels_per_unit = (
-			1000000.0 * context.scene.unit_settings.scale_length
-		) / self.voxel_size
+		place = _placement(context, self.voxel_size)
 		# Only what was just imported ends up selected, when there is a mode
 		# where that means anything.
 		if bpy.ops.object.select_all.poll():
@@ -535,7 +547,7 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 				print("velend: reading %s failed: %s" % (path, error))
 				failures.append("%s (%s)" % (os.path.basename(path), error))
 				continue
-			_link_surface(context, surface, voxels_per_unit, self.step, self.voxel_size)
+			_link_surface(context, surface, place, self.step, self.voxel_size)
 			vertices += len(surface.positions)
 			faces += len(surface.quads)
 
@@ -554,10 +566,10 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 		return {'FINISHED'}
 
 
-def _umbilicus_mesh(name, curve, voxels_per_unit):
+def _umbilicus_mesh(name, curve, place):
 	"""A mesh of the umbilicus' points joined into a polyline, in Blender units."""
 	mesh = bpy.data.meshes.new(name)
-	positions = (curve.positions / voxels_per_unit).astype(np.float32)
+	positions = place(curve.positions)
 	mesh.vertices.add(len(positions))
 	mesh.edges.add(len(curve.edges))
 	mesh.vertices.foreach_set("co", positions.ravel())
@@ -584,8 +596,9 @@ class velend_OT_import_umbilicus(bpy.types.Operator):
 		name="Voxel Size",
 		description=(
 			"Width of a full resolution voxel, in micrometers, for the volume "
-			"the points were placed in. Filled in from the scene's own voxel "
-			"size, and overridden by the file when it states one of its own"
+			"the points were placed in. Filled in from the voxel size of the "
+			"volume being rendered, and overridden by the file when it states "
+			"one of its own"
 		),
 		default=9.362,
 		min=1e-6,
@@ -594,7 +607,7 @@ class velend_OT_import_umbilicus(bpy.types.Operator):
 	)
 
 	def invoke(self, context, event):
-		# The scene's volume is the one an umbilicus most likely belongs to.
+		# The volume being rendered is the one an umbilicus most likely belongs to.
 		self.voxel_size = context.scene.velend.resolution
 		context.window_manager.fileselect_add(self)
 		return {'RUNNING_MODAL'}
@@ -613,12 +626,10 @@ class velend_OT_import_umbilicus(bpy.types.Operator):
 		# A file that states its own voxel size has said what frame its numbers
 		# are in, which beats what the scene happens to be set to.
 		voxel_size = curve.voxel_size_um or self.voxel_size
-		voxels_per_unit = (
-			1000000.0 * context.scene.unit_settings.scale_length
-		) / voxel_size
+		place = _placement(context, voxel_size)
 
 		name = curve.name
-		obj = bpy.data.objects.new(name, _umbilicus_mesh(name, curve, voxels_per_unit))
+		obj = bpy.data.objects.new(name, _umbilicus_mesh(name, curve, place))
 		# Where it came from and what it was read with, so that a later reload
 		# or export does not have to be told again.
 		obj["velend_umbilicus_path"] = curve.path
