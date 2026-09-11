@@ -12,6 +12,7 @@ catalogue is safe to read from the loader threads.
 import gzip
 import json
 import os
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -19,6 +20,7 @@ from datetime import datetime, timezone
 from email.utils import formatdate
 
 import bpy
+import numpy as np
 
 
 OPEN_DATA_BUCKET = "vesuvius-challenge-open-data"
@@ -206,6 +208,97 @@ def data_url(data, type, **parameters):
 			if fallback is None:
 				fallback = url
 	return fallback
+
+
+# Volume ids are timestamps, and a volume's OME-Zarr is named after the volume
+# it holds, both in the bucket and in the cache directory VC3D reads it through
+# (which appends a hash of the URL): "20231027191953-3.240um-53keV-masked.zarr".
+_NAMED_VOLUME_ID = re.compile(r"^(\d{14})(?:\D|$)")
+
+
+def volume_id_for(*locations):
+	"""The id of the volume a URL or a directory names, or "" for one that
+	names none.
+
+	The locations are tried in the order given, so the caller puts the one it
+	trusts most first.
+	"""
+	for location in locations:
+		location = (location or "").strip().rstrip("/")
+		if not location:
+			continue
+		match = _NAMED_VOLUME_ID.match(os.path.basename(location))
+		if match:
+			return match.group(1)
+	return ""
+
+
+def _affine(rows):
+	"""One of the manifest's matrices as a 4x4 array, or None for one that is
+	not a shape we can read.
+
+	They are written as the three rows that matter, and occasionally as all
+	four. Only an affine is a transform between voxel spaces, so a fourth row
+	stating anything but (0, 0, 0, 1) is one of these we cannot read.
+	"""
+	try:
+		rows = np.asarray(rows, dtype=np.float64)
+	except (TypeError, ValueError):
+		return None
+	if rows.ndim != 2 or rows.shape[1] != 4 or rows.shape[0] not in (3, 4):
+		return None
+	if rows.shape[0] == 4 and not np.allclose(rows[3], [0.0, 0.0, 0.0, 1.0]):
+		return None
+	matrix = np.eye(4)
+	matrix[:3] = rows[:3]
+	return matrix
+
+
+def _transforms_from(volume_id):
+	"""The list of transforms out of a volume, wherever its sample is."""
+	volume = VOLUMES.get(volume_id)
+	if volume is not None:
+		return volume.sample.volume_transforms.get(volume_id) or []
+	# A volume the catalogue does not list can still be one an overlay states
+	# transforms for, so fall back to searching the samples for it.
+	for sample in SAMPLES.values():
+		transforms = sample.volume_transforms.get(volume_id)
+		if transforms:
+			return transforms
+	return []
+
+
+def volume_transform(from_id, to_id):
+	"""The 4x4 matrix taking a point in one volume's voxels into another's, or
+	None when nothing relates the two.
+
+	The volumes of a sample are registered to each other pairwise, with no
+	space they all share and no canonical one among them, so this only answers
+	for a pair the manifest states. It states every pair of a sample's
+	registered volumes, both ways round, but an overlay written by hand need
+	not: a direction it leaves out is taken from the opposite one inverted.
+	"""
+	if not from_id or not to_id:
+		return None
+	if from_id == to_id:
+		return np.eye(4)
+	for transform in _transforms_from(from_id):
+		if transform.get("to_volume_id") == to_id:
+			matrix = _affine(transform.get("matrix"))
+			if matrix is not None:
+				return matrix
+	for transform in _transforms_from(to_id):
+		if transform.get("to_volume_id") == from_id:
+			matrix = _affine(transform.get("matrix"))
+			if matrix is None:
+				continue
+			try:
+				return np.linalg.inv(matrix)
+			except np.linalg.LinAlgError:
+				# A registration that collapses the volume onto a plane cannot
+				# be run backwards. Nothing else states this direction.
+				return None
+	return None
 
 
 def parse(manifest):

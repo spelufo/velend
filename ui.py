@@ -33,17 +33,31 @@ def resolution_from_path(path):
 
 
 def _volume_path_updated(self, context):
-	resolution = resolution_from_path(self.volume_path)
-	if resolution is not None:
-		# Assigning fires `_resolution_updated` too, whose work the reset below
-		# redoes; harmless, as nothing is loaded until the next draw either way.
-		self.resolution = resolution
+	volume_id = metadata.volume_id_for(self.source_url, self.volume_path)
+	if metadata.volume_transform(self.scene_volume_id, volume_id) is None:
+		# Nothing in the manifest relates the two, so nothing says how the new
+		# volume sits against the scene's coordinates. Its own voxels become
+		# them, the way the first volume loaded did.
+		self.scene_volume_id = volume_id
+	if self.scene_volume_id == volume_id:
+		resolution = resolution_from_path(self.volume_path)
+		if resolution is not None:
+			# Assigning fires `_resolution_updated` too, whose work the reset
+			# below redoes; harmless, as nothing is loaded until the next draw
+			# either way.
+			self.resolution = resolution
 	state.close_volume()
 	VolumeSamplerRenderEngine.reset()
 
 
 def _resolution_updated(self, context):
 	VolumeSamplerRenderEngine.rescale()
+
+
+def _debug_level_colors_updated(self, context):
+	# The flag is a compile time define in the fragment shader, so the shaders
+	# have to be built again for the toggle to show.
+	VolumeSamplerRenderEngine.reload_shaders()
 
 
 # Blender does not copy the strings an enum callback returns, so anything they
@@ -126,10 +140,11 @@ def _volume_updated(self, context):
 		return
 	# Assigning fires `_volume_path_updated`, which reopens the volume and
 	# reads the voxel size out of the URL. The manifest states it outright,
-	# so take it from there instead.
+	# so take it from there instead -- unless that update left the scene in
+	# another volume's voxels, which are the ones Voxel Size then states.
 	self.source_url = ""
 	self.volume_path = volume.zarr_url
-	if volume.pixel_size_um:
+	if volume.pixel_size_um and self.scene_volume_id == volume.id:
 		self.resolution = volume.pixel_size_um
 
 
@@ -188,6 +203,16 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		subtype='DIR_PATH',
 		update=_volume_path_updated,
 	)
+	scene_volume_id: bpy.props.StringProperty(
+		name="Scene Volume",
+		description=(
+			"The volume whose voxels the scene's own coordinates are in, which "
+			"is also what Voxel Size states. Another volume of the same sample "
+			"renders through the transform the metadata registers for the pair, "
+			"so that meshes placed against one stay put in the other"
+		),
+		options=set(),
+	)
 	source_url: bpy.props.StringProperty(
 		name="Source URL",
 		description="Public HTTP(S) Zarr root for missing local mirror objects",
@@ -197,14 +222,25 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 	resolution: bpy.props.FloatProperty(
 		name="Voxel Size",
 		description=(
-			"Width of a full resolution voxel, in micrometers. Filled in from "
-			"the volume's directory name when that names it"
+			"Width of a full resolution voxel of the volume the scene's "
+			"coordinates are in, in micrometers. Filled in from that volume's "
+			"directory name when it names it"
 		),
 		default=9.362,
 		min=1e-6,
 		soft_max=100.0,
 		precision=3,
 		update=_resolution_updated,
+	)
+	debug_level_colors: bpy.props.BoolProperty(
+		name="Level Colors",
+		description=(
+			"Tint each fragment by the resolution level its samples came from "
+			"instead of shading it, to show what the streamer has loaded"
+		),
+		default=False,
+		options=set(),
+		update=_debug_level_colors_updated,
 	)
 
 
@@ -250,6 +286,20 @@ class SCENE_PT_velend(bpy.types.Panel):
 
 		status, icon = VolumeSamplerRenderEngine.status()
 		layout.label(text=status, icon=icon)
+		if settings.scene_volume_id and settings.scene_volume_id != metadata.volume_id_for(
+			settings.source_url, settings.volume_path
+		):
+			layout.label(
+				text="Scene is in %s voxels" % settings.scene_volume_id,
+				icon='ORIENTATION_LOCAL',
+			)
+
+		# A view option rather than something the volume is loaded through, so
+		# it sits with the streaming controls and not with the fields above.
+		debug = layout.column()
+		debug.use_property_split = True
+		debug.use_property_decorate = False
+		debug.prop(settings, "debug_level_colors")
 
 		row = layout.row(align=True)
 		row.operator("velend.load_hires")

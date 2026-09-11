@@ -91,7 +91,6 @@ class BrickAtlas:
 			info.compute_source(source)
 			self.copy_shader = gpu.shader.create_from_info(info)
 			self.copy_failed = False
-			print("velend: loaded brick copy shader")
 		except Exception as error:
 			print("velend: brick copy shader failed:", error)
 			self.copy_shader = None

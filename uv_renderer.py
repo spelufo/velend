@@ -20,7 +20,8 @@ _dirty = True
 _VERTEX_SOURCE = """
 void main() {
     vec4 world = volumeUniforms.modelMatrix * vec4(position, 1.0);
-    voxelCoord = world.xyz * volumeUniforms.voxelsPerUnit;
+    voxelCoord = (volumeUniforms.volumeTransform *
+        vec4(world.xyz * volumeUniforms.voxelsPerUnit, 1.0)).xyz;
     gl_Position = volumeUniforms.viewProjectionMatrix * vec4(uv, 0.0, 1.0);
     // Behind UV edges/vertices, in front of the image.
     gl_Position.z = 0.5 * gl_Position.w;
@@ -104,8 +105,7 @@ def _draw():
 		gpu.state.depth_test_set('LESS_EQUAL')
 		gpu.state.depth_mask_set(False)
 		_shader.bind()
-		_shader.uniform_sampler('volume', Engine.volume)
-		for level in bricks.ACTIVE_LEVELS:
+		for level in bricks.LEVELS:
 			_shader.uniform_sampler('l%dAtlas' % level, Engine.atlases[level].texture)
 			_shader.uniform_sampler('l%dPageTable' % level, Engine.atlases[level].page_texture)
 		Engine.update_uniform_buffer(gpu.matrix.get_projection_matrix(), obj.matrix_world)

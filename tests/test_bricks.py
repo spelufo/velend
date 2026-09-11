@@ -82,7 +82,9 @@ class BrickTests(unittest.TestCase):
 		self.assertIsNot(brick, bricks.EMPTY_BRICK)
 		self.assertEqual(float(brick[bricks.BRICK_PAD, bricks.BRICK_PAD, bricks.BRICK_PAD]), 1.0)
 
-	def test_coarser_levels_are_empty_until_finer_capacity_is_exceeded(self):
+	def test_every_level_takes_what_its_atlas_holds(self):
+		# Twenty chunks in a row. Each level sees all of them on its own grid,
+		# so none is left empty waiting for a finer one to overflow.
 		chunks = np.stack(
 			[np.arange(20), np.zeros(20, dtype=int), np.zeros(20, dtype=int)],
 			axis=1,
@@ -93,9 +95,24 @@ class BrickTests(unittest.TestCase):
 			(0, 0, 0),
 			slot_counts=(20, 10, 5),
 		)
-		self.assertEqual([len(selected[level][0]) for level in range(3)], [20, 0, 0])
+		self.assertEqual([len(selected[level][0]) for level in range(3)], [20, 10, 5])
 
-	def test_overflow_cascades_through_all_levels(self):
+	def test_levels_cover_overlapping_ground(self):
+		# What the finest level holds must also be covered by the coarser ones,
+		# or a chunk still in flight at L0 would have nothing behind it.
+		chunks = np.indices((8, 8, 8)).reshape(3, -1).T
+		selected = bricks.select_lod_chunks(
+			chunks,
+			{0: (8, 8, 8), 1: (4, 4, 4), 2: (2, 2, 2)},
+			(0, 0, 0),
+			slot_counts=(8, 64, 8),
+		)
+		for level in (1, 2):
+			parents = {tuple(coord) for coord in selected[level][1]}
+			for coord in selected[0][1]:
+				self.assertIn(tuple(coord >> level), parents)
+
+	def test_each_level_keeps_its_selection_distinct(self):
 		parents = np.indices((16, 16, 16)).reshape(3, -1).T
 		chunks = parents * 2
 		selected = bricks.select_lod_chunks(
@@ -115,9 +132,48 @@ class BrickTests(unittest.TestCase):
 			coords = selected[level][1]
 			self.assertEqual(len(np.unique(coords, axis=0)), len(coords))
 
+	def test_levels_collapse_by_their_own_distance_from_level_zero(self):
+		# Five chunks in a row. On a grid two levels coarser they fall into two
+		# chunks, and four levels coarser into one, whatever the levels in
+		# between hold.
+		chunks = np.array([[i, 0, 0] for i in range(5)])
+		selected = bricks.select_lod_chunks(
+			chunks,
+			{0: (32, 32, 32), 2: (8, 8, 8), 4: (2, 2, 2)},
+			(0, 0, 0),
+			slot_counts=(1, 5, 5),
+		)
+		self.assertEqual([len(selected[level][0]) for level in (0, 2, 4)], [1, 2, 1])
+		np.testing.assert_array_equal(
+			np.sort(selected[2][1], axis=0), [[0, 0, 0], [1, 0, 0]]
+		)
+
+	def test_levels_need_not_start_at_zero(self):
+		# The caller always hands over level 0 chunks, so every level shifts
+		# them onto its own grid first.
+		chunks = np.array([[0, 0, 0], [4, 0, 0], [8, 0, 0]])
+		selected = bricks.select_lod_chunks(
+			chunks,
+			{2: (16, 16, 16), 3: (8, 8, 8)},
+			(0, 0, 0),
+			slot_counts=(2, 5),
+		)
+		np.testing.assert_array_equal(selected[2][1], [[0, 0, 0], [1, 0, 0]])
+		np.testing.assert_array_equal(selected[3][1], [[0, 0, 0], [1, 0, 0]])
+
+	def test_next_level_walks_the_configured_levels(self):
+		levels = bricks.LEVELS
+		self.assertEqual(
+			[bricks.next_level(level) for level in levels],
+			list(levels[1:]) + [None],
+		)
+
 	def test_default_memory_budgets_derive_expected_atlas_sizes(self):
-		self.assertEqual(bricks.SLOTS_PER_AXIS, (12, 10, 8, 6, 4))
-		for budget, slots in zip(bricks.ATLAS_MEMORY_MB, bricks.SLOTS_PER_AXIS):
+		self.assertEqual(
+			bricks.SLOTS_PER_AXIS, {0: 12, 1: 10, 2: 8, 3: 6, 4: 4, 5: 6}
+		)
+		for level, slots in bricks.SLOTS_PER_AXIS.items():
+			budget = bricks.ATLAS_MEMORY_MB[level]
 			used = slots ** 3 * bricks.BRICK_SIZE ** 3
 			next_size = (slots + 1) ** 3 * bricks.BRICK_SIZE ** 3
 			self.assertLessEqual(used, budget * 1_000_000)

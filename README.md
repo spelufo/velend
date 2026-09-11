@@ -64,6 +64,33 @@ Hit "space" to search for commands and search for "Frame selected".
 Hit "z" and choose "Rendered" to show the scroll scan on the cutting planes.
 
 
+### Switching volumes
+
+A sample is often scanned more than once, and the open data metadata registers
+its volumes against each other: for each ordered pair of them, the matrix that
+takes a point in one's voxels into the other's. There is no space they all
+share and no canonical one among them, so it is always a pair.
+
+The scene's coordinates stay in the voxels of the volume it was set up against,
+and Voxel Size states how wide one of those is. Point it at another volume of
+the same sample and it renders that one through the matrix registered for the
+pair, so a cutting plane or an imported segment keeps showing the same place
+in the scroll -- at whatever resolution and orientation the new volume
+reconstructed it. The panel says which volume the scene is in whenever that is
+no longer the one being rendered.
+
+A volume the metadata cannot relate to the scene's has nothing saying how the
+two sit against each other, so it becomes the scene's frame instead, the way
+the first volume loaded did: its own voxels, and its own voxel size. Anything
+already placed in the scene stays where it is, which is no longer where it was
+in the volume it came from.
+
+A transform that has not reached the published metadata yet can be supplied
+through Preferences > Add-ons > velend > Extra Metadata, a JSON file shaped
+like `metadata.json` and merged over it. A direction it leaves out is taken
+from the opposite one inverted.
+
+
 ### Blender crash course
 
 - `shift + rmb` to place the 3d cursor

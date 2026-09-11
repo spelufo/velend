@@ -16,9 +16,9 @@ from velend.renderer import VolumeSamplerRenderEngine as E
 from velend import bricks, uv_renderer
 for mod in velend._modules:
     if hasattr(mod, 'register'): mod.register()
-bricks.SLOTS_PER_AXIS = (1,) * 5
-bricks.SLOT_COUNTS = (1,) * 5
-bricks.ATLAS_DIMS = (bricks.BRICK_SIZE,) * 5
+bricks.SLOTS_PER_AXIS = {level: 1 for level in bricks.LEVELS}
+bricks.SLOT_COUNTS = {level: 1 for level in bricks.LEVELS}
+bricks.ATLAS_DIMS = {level: bricks.BRICK_SIZE for level in bricks.LEVELS}
 tmp = tempfile.TemporaryDirectory()
 root = Path(tmp.name)/'volume'
 group = zarr.open_group(root, mode='w', zarr_format=2)
@@ -41,7 +41,7 @@ def tick():
             phase = 1
             return 2
         if phase == 1:
-            assert E.volume is not None and E.shader is not None, E.status()
+            assert E.atlases and E.shader is not None, E.status()
             print('VELEND 3D GPU PASSED', flush=True)
             obj = bpy.data.objects['Cut Z']
             bpy.context.view_layer.objects.active = obj

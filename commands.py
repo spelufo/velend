@@ -4,6 +4,7 @@ import os
 import bpy
 import numpy as np
 
+from . import metadata
 from . import state
 from . import tifxyz
 from . import umbilicus
@@ -197,11 +198,18 @@ class velend_OT_set_volpkg_volume(bpy.types.Operator):
 		settings = context.scene.velend
 		# The URL first: setting either of the two reopens the volume, and
 		# doing it in this order means the reopen that sticks is the one with
-		# both of them in hand. The path assignment fills the voxel size in
-		# from the directory's name, which the project states outright.
+		# both of them in hand.
 		settings.source_url = volume.url
 		settings.volume_path = volume.path
-		if volume.resolution_um:
+		# The project states the voxel size outright, which beats the guess the
+		# assignments above made from the directory's name. It says how wide a
+		# voxel of this volume is, so it only applies while the scene's own
+		# coordinates are still in them: a transform onto another volume of the
+		# sample carries the change of voxel size with it.
+		anchored = settings.scene_volume_id == metadata.volume_id_for(
+			settings.source_url, settings.volume_path
+		)
+		if volume.resolution_um and anchored:
 			settings.resolution = volume.resolution_um
 
 		if volume.remote and not volume.cached:
@@ -228,8 +236,9 @@ def _ensure_plane(scene, name):
 	plane = bpy.data.objects.get(name)
 	if plane is None or plane.type != 'MESH':
 		mesh = bpy.data.meshes.new(name)
-		# A unit square in the local XY plane. Its size lives in the object's
-		# scale, so running this again only has to move the objects about.
+		# A unit square in the local XY plane, resized in place by
+		# `_resize_plane` on every run instead of through the object's scale,
+		# so the object never ends up with a non-uniform scale.
 		mesh.from_pydata(
 			[(-0.5, -0.5, 0.0), (0.5, -0.5, 0.0), (0.5, 0.5, 0.0), (-0.5, 0.5, 0.0)],
 			[],
@@ -240,6 +249,52 @@ def _ensure_plane(scene, name):
 	if plane.name not in scene.collection.all_objects:
 		scene.collection.objects.link(plane)
 	return plane
+
+
+def _resize_plane(plane, width, height):
+	"""Set the plane's mesh to `width` x `height` local units, leaving the
+	object's scale at 1 so it doesn't trip Blender's non-uniform scale
+	warning."""
+	half_w, half_h = width / 2.0, height / 2.0
+	plane.data.vertices.foreach_set(
+		'co',
+		(
+			-half_w, -half_h, 0.0,
+			half_w, -half_h, 0.0,
+			half_w, half_h, 0.0,
+			-half_w, half_h, 0.0,
+		),
+	)
+	plane.data.update()
+
+
+def _frame_objects(context, objects):
+	"""Point every 3D viewport at `objects`, leaving the selection as it was."""
+	# Selecting is how `view3d.view_selected` is aimed, and that only works in
+	# object mode; a headless run has no viewport to aim at all.
+	if not objects or context.screen is None or context.mode != 'OBJECT':
+		return
+	view_layer = context.view_layer
+	selected = list(context.selected_objects)
+	active = view_layer.objects.active
+	bpy.ops.object.select_all(action='DESELECT')
+	for obj in objects:
+		obj.select_set(True)
+	view_layer.objects.active = objects[0]
+	try:
+		for area in context.screen.areas:
+			if area.type != 'VIEW_3D':
+				continue
+			region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+			if region is None:
+				continue
+			with context.temp_override(area=area, region=region):
+				bpy.ops.view3d.view_selected()
+	finally:
+		bpy.ops.object.select_all(action='DESELECT')
+		for obj in selected:
+			obj.select_set(True)
+		view_layer.objects.active = active
 
 
 def _setup_viewports(context):
@@ -305,14 +360,26 @@ class velend_OT_setup_scene(bpy.types.Operator):
 		_setup_viewports(context)
 
 		engine.voxels_per_unit = engine.compute_voxels_per_unit()
-		shape_xyz = reversed(engine.get_volume()[0].shape)
-		extents = [size / engine.voxels_per_unit for size in shape_xyz]
-		center = [extent / 2.0 for extent in extents]
+		engine.ensure_grid()
+		# In the scene's own voxels, which are the loaded volume's unless the
+		# scene was set up against another volume of the same sample and is
+		# rendering this one through the transform between the two.
+		low, high = engine.scene_voxel_bounds()
+		extents = [size / engine.voxels_per_unit for size in high - low]
+		center = [middle / engine.voxels_per_unit for middle in (low + high) / 2.0]
+		planes = []
 		for name, rotation, (local_x, local_y) in _PLANE_SPECS:
 			plane = _ensure_plane(scene, name)
 			plane.location = center
 			plane.rotation_euler = rotation
-			plane.scale = (extents[local_x], extents[local_y], 1.0)
+			_resize_plane(plane, extents[local_x], extents[local_y])
+			planes.append(plane)
+
+		# The planes span the volume, so framing them is framing the scan: the
+		# viewports start out looking at all of it rather than at whatever the
+		# previous file left them on.
+		context.view_layer.update()
+		_frame_objects(context, planes)
 
 		# Bricks stream in around the 3D cursor, so leaving it at the origin
 		# would fill the atlases from one corner of the volume.

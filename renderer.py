@@ -7,6 +7,7 @@ import numpy as np
 
 from . import atlas as atlas_module
 from . import bricks
+from . import metadata
 from . import state
 
 
@@ -33,8 +34,6 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	load_future = None
 	load_key = None
 	pyramid = None
-	coarse = None
-	volume = None
 	shader = None
 	shader_mtimes = None
 	uniform_buffer = None
@@ -48,11 +47,17 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	# it waits for `view_draw`, where a GPU context is active.
 	pending_reset = False
 
-	# Level 0 voxels per Blender unit, and the extent in level 0 voxels that the
-	# low resolution texture spans. Both are set up by `ensure_grid`.
+	# Level 0 voxels per Blender unit, set up by `ensure_grid`.
 	voxels_per_unit = 1.0
-	lores_extent = (1.0, 1.0, 1.0)
 	shape_xyz = None
+	# The affine taking the scene's own voxels into the loaded volume's, set up
+	# by `ensure_grid` alongside them. The scene's coordinates stay in the
+	# voxels of the volume it was set up against -- `ui` says which, and only
+	# re-anchors it to a volume the manifest cannot relate to that one -- so
+	# rendering another volume of the same sample means sampling it through the
+	# matrix registered for the pair. Identity while the two are the same
+	# volume, and while nothing relates them.
+	volume_transform = np.eye(4)
 
 	# Brick streaming. Residency and loader state are CPU only so the operator
 	# can retarget without a GPU context; the atlases own the textures.
@@ -62,14 +67,14 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	shapes_xyz = {}
 	# Chunks the focus point currently asks for, per pyramid level. Completed
 	# reads that fall out of these sets are dropped rather than uploaded.
-	wanted = {level: frozenset() for level in bricks.ACTIVE_LEVELS}
+	wanted = {level: frozenset() for level in bricks.LEVELS}
 	# Coarser levels start one at a time after all finer work has reached its
 	# atlas. Values are tuples of (page_key, chunk_xyz) requests.
 	pending_levels = {}
 	# Occupancy learned from completed reads. Empty chunks are never requested
 	# again, and their parents are promoted as higher-level fallbacks.
-	empty_chunks = {level: set() for level in bricks.ACTIVE_LEVELS}
-	fallback_keys = {level: set() for level in bricks.ACTIVE_LEVELS}
+	empty_chunks = {level: set() for level in bricks.LEVELS}
+	fallback_keys = {level: set() for level in bricks.LEVELS}
 	last_focus_voxel = np.zeros(3, dtype=np.float64)
 	# The focus last passed to `retarget`, compared against the live 3D cursor
 	# by `_watch_cursor` -- cursor moves aren't depsgraph updates, so nothing
@@ -116,7 +121,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		if key == cls.failed_path:
 			return None
 		if cls.load_key != key:
-			cls.pyramid = cls.coarse = None
+			cls.pyramid = None
 			cls.load_key = key
 			cls.load_future = cls.load_executor.submit(cls.load_initial, *key)
 		if cls.pyramid is not None:
@@ -125,7 +130,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			cls.volume_error = "Loading volume..."
 			return None
 		try:
-			cls.pyramid, cls.coarse = cls.load_future.result()
+			cls.pyramid = cls.load_future.result()
 		except Exception as error:
 			cls.failed_path = key
 			cls.volume_error = "Cannot open volume: %s" % error
@@ -141,12 +146,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		if not source_url and "://" in path and not state.online_access:
 			raise OSError("Network access is disabled in Blender")
 		volume = state.open_volume(path, source_url)
-		if len(volume) <= bricks.FALLBACK_LEVEL:
-			raise ValueError("Volume has %d pyramid levels, %d are needed" % (
-				len(volume), bricks.FALLBACK_LEVEL + 1))
-		lores = np.ascontiguousarray(volume[bricks.FALLBACK_LEVEL][:], dtype=np.float32)
-		lores *= np.float32(1.0 / 255.0)
-		return volume, lores
+		if len(volume) <= bricks.LEVELS[-1]:
+			raise ValueError("Volume has %d pyramid levels, level %d is needed" % (
+				len(volume), bricks.LEVELS[-1]))
+		return volume
 
 	@classmethod
 	def compute_voxels_per_unit(cls):
@@ -154,6 +157,46 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		scene = bpy.context.scene
 		# Full-res voxels are `resolution` µm across.
 		return (1000000.0 * scene.unit_settings.scale_length) / scene.velend.resolution
+
+	@classmethod
+	def compute_volume_transform(cls):
+		"""The affine taking the scene's own voxels into the loaded volume's."""
+		settings = cls.settings()
+		matrix = metadata.volume_transform(
+			settings.scene_volume_id,
+			# The URL first: while both name the volume, only it is untouched
+			# by the cache directory naming VC3D puts around it.
+			metadata.volume_id_for(settings.source_url, settings.volume_path),
+		)
+		return np.eye(4) if matrix is None else matrix
+
+	@classmethod
+	def to_volume_voxels(cls, voxels):
+		"""Scene voxel coordinates into the loaded volume's, the way the vertex
+		shader takes them. One point or an (n, 3) array of them."""
+		matrix = cls.volume_transform
+		return voxels @ matrix[:3, :3].T + matrix[:3, 3]
+
+	@classmethod
+	def scene_voxel_bounds(cls):
+		"""The loaded volume's extent as a `(low, high)` pair of corners in the
+		scene's own voxels: the box its corners span brought back through
+		`volume_transform`.
+
+		The volume need not sit square to the scene once transformed, so this
+		is the axis aligned box around it rather than the volume itself.
+		"""
+		shape = np.asarray(cls.shape_xyz, dtype=np.float64)
+		corners = np.array([
+			[x, y, z] for x in (0.0, shape[0]) for y in (0.0, shape[1])
+			for z in (0.0, shape[2])
+		])
+		try:
+			inverse = np.linalg.inv(cls.volume_transform)
+		except np.linalg.LinAlgError:
+			return np.zeros(3), shape
+		corners = corners @ inverse[:3, :3].T + inverse[:3, 3]
+		return corners.min(axis=0), corners.max(axis=0)
 
 	@classmethod
 	def status(cls):
@@ -175,7 +218,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			cls.load_future.cancel()
 		cls.load_future = None
 		cls.load_key = None
-		cls.pyramid = cls.coarse = None
+		cls.pyramid = None
 		cls.pending_reset = True
 		# Cleared here rather than in the deferred teardown so that the panel
 		# stops reporting the previous volume's trouble straight away.
@@ -190,15 +233,15 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		if cls.loader is not None:
 			cls.loader.shutdown()
 			cls.loader = None
-		cls.volume = None
 		cls.atlases = {}
 		cls.residencies = {}
 		cls.shapes_xyz = {}
 		cls.shape_xyz = None
-		cls.wanted = {level: frozenset() for level in bricks.ACTIVE_LEVELS}
+		cls.volume_transform = np.eye(4)
+		cls.wanted = {level: frozenset() for level in bricks.LEVELS}
 		cls.pending_levels = {}
-		cls.empty_chunks = {level: set() for level in bricks.ACTIVE_LEVELS}
-		cls.fallback_keys = {level: set() for level in bricks.ACTIVE_LEVELS}
+		cls.empty_chunks = {level: set() for level in bricks.LEVELS}
+		cls.fallback_keys = {level: set() for level in bricks.LEVELS}
 		cls.last_focus_voxel = np.zeros(3, dtype=np.float64)
 		cls.last_cursor = None
 		# The page table dimensions are baked into the fragment shader, so a
@@ -222,6 +265,13 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			os.stat(_FRAG_SHADER_PATH).st_mtime_ns,
 			os.stat(atlas_module.COPY_SHADER_PATH).st_mtime_ns,
 		)
+
+	@classmethod
+	def reload_shaders(cls):
+		"""Drop the compiled shaders so the next draw builds them again."""
+		cls.shader = None
+		cls.shader_mtimes = None
+		cls.request_redraw()
 
 	@classmethod
 	def shaders_changed(cls):
@@ -253,20 +303,24 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			return
 		cls.shapes_xyz = {
 			level: tuple(int(s) for s in reversed(volume[level].shape))
-			for level in bricks.ACTIVE_LEVELS
+			for level in bricks.LEVELS
 		}
-		cls.shape_xyz = cls.shapes_xyz[0]
+		# Level 0 is the coordinate system everything else is expressed in, so
+		# it is read straight off the pyramid rather than out of `shapes_xyz`:
+		# `LEVELS` need not name it.
+		cls.shape_xyz = tuple(int(s) for s in reversed(volume[0].shape))
 		cls.voxels_per_unit = cls.compute_voxels_per_unit()
+		cls.volume_transform = cls.compute_volume_transform()
 		cls.residencies = {
 			level: bricks.Residency(
 				bricks.grid_dims(cls.shapes_xyz[level]), bricks.SLOT_COUNTS[level]
 			)
-			for level in bricks.ACTIVE_LEVELS
+			for level in bricks.LEVELS
 		}
 		cls.loader = bricks.BrickLoader(volume)
-		cls.empty_chunks = {level: set() for level in bricks.ACTIVE_LEVELS}
-		cls.fallback_keys = {level: set() for level in bricks.ACTIVE_LEVELS}
-		for level in bricks.ACTIVE_LEVELS:
+		cls.empty_chunks = {level: set() for level in bricks.LEVELS}
+		cls.fallback_keys = {level: set() for level in bricks.LEVELS}
+		for level in bricks.LEVELS:
 			print(
 				"velend: L%d chunk grid" % level,
 				cls.residencies[level].dims,
@@ -276,34 +330,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			)
 
 	@classmethod
-	def ensure_volume(cls):
-		if cls.volume is not None:
-			return
-
-		volume = cls.get_volume()
-		if volume is None:
-			return
-		lores = cls.coarse
-
-		# Numpy is C-order (Z, Y, X); GPUTexture is (width, height, depth). The
-		# level 5 array covers the level 0 extent rounded up to a multiple of
-		# 2^5, which is the extent to normalise against.
-		dims = tuple(reversed(lores.shape))
-		cls.lores_extent = tuple(d * (1 << bricks.FALLBACK_LEVEL) for d in dims)
-
-		cls.volume = gpu.types.GPUTexture(
-			dims,
-			format='R8',
-			data=atlas_module.texture_data(lores),
-		)
-		# Trilinear interpolation between the random texels.
-		cls.volume.filter_mode(True)
-
-	@classmethod
 	def ensure_atlases(cls):
 		if not cls.residencies:
 			return
-		for level in bricks.ACTIVE_LEVELS:
+		for level in bricks.LEVELS:
 			if level in cls.atlases:
 				continue
 			residency = cls.residencies[level]
@@ -354,8 +384,14 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		shader_info.define("BRICK_CORE", str(bricks.BRICK_CORE))
 		shader_info.define("BRICK_PAD", str(bricks.BRICK_PAD))
 		shader_info.define("BRICK_SIZE", str(bricks.BRICK_SIZE))
-		shader_info.define("LEVEL_CAP", str(bricks.LEVEL_CAP))
-		for level in bricks.ACTIVE_LEVELS:
+		# The debug view is a whole other branch of the fragment shader rather
+		# than a uniform, so toggling it recompiles: `reload_shaders` is what
+		# the setting calls to make that happen.
+		shader_info.define(
+			"DEBUG_LEVEL_COLORS", "1" if cls.settings().debug_level_colors else "0"
+		)
+		for level in bricks.LEVELS:
+			shader_info.define("L%d_ACTIVE" % level, "1")
 			shader_info.define(
 				"L%d_SLOTS_PER_AXIS" % level, str(bricks.SLOTS_PER_AXIS[level])
 			)
@@ -366,22 +402,26 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 				"L%d_PAGE_DIMS" % level,
 				"ivec3(%d, %d, %d)" % cls.residencies[level].dims,
 			)
+			# What a level 0 coordinate is multiplied by to reach this level's
+			# voxels. A negative power of two, so the literal is exact.
+			shader_info.define(
+				"L%d_SCALE" % level, repr(1.0 / (1 << level))
+			)
 		shader_info.typedef_source("""
 			struct VolumeUniforms {
 				mat4 viewProjectionMatrix;
 				mat4 modelMatrix;
+				mat4 volumeTransform;
 				vec3 voxelsPerUnit;
-				vec3 loresExtent;
 			};
 		""")
 		shader_info.uniform_buf(0, "VolumeUniforms", "volumeUniforms")
-		shader_info.sampler(0, 'FLOAT_3D', "volume")
-		for level in bricks.ACTIVE_LEVELS:
+		for level in bricks.LEVELS:
 			shader_info.sampler(
-				1 + level * 2, 'FLOAT_3D', "l%dAtlas" % level
+				level * 2, 'FLOAT_3D', "l%dAtlas" % level
 			)
 			shader_info.sampler(
-				2 + level * 2, 'FLOAT_3D', "l%dPageTable" % level
+				level * 2 + 1, 'FLOAT_3D', "l%dPageTable" % level
 			)
 		shader_info.vertex_in(0, 'VEC3', "position")
 		if uv:
@@ -398,20 +438,20 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.ensure_grid()
 		if not cls.residencies:
 			return
-		cls.ensure_volume()
 		cls.ensure_atlases()
 		cls.ensure_shader()
 
 	@classmethod
 	def update_uniform_buffer(cls, view_projection_matrix, model_matrix):
-		# std140 lays out each mat4 as four vec4 columns. `vec3` has a 16-byte stride.
-		data = np.empty(40, dtype=np.float32)
+		# std140 lays out each mat4 as four vec4 columns. `vec3` has a 16-byte
+		# stride. The matrices are transposed on the way in: Blender writes them
+		# a row at a time, GLSL reads them a column at a time.
+		data = np.empty(52, dtype=np.float32)
 		data[:16] = np.asarray(view_projection_matrix, dtype=np.float32).T.ravel()
 		data[16:32] = np.asarray(model_matrix, dtype=np.float32).T.ravel()
-		data[32:35] = cls.voxels_per_unit
-		data[35] = 0.0
-		data[36:39] = cls.lores_extent
-		data[39] = 0.0
+		data[32:48] = np.asarray(cls.volume_transform, dtype=np.float32).T.ravel()
+		data[48:51] = cls.voxels_per_unit
+		data[51] = 0.0
 		buffer = gpu.types.Buffer('FLOAT', len(data), data)
 		if cls.uniform_buffer is None:
 			cls.uniform_buffer = gpu.types.GPUUniformBuf(buffer)
@@ -479,15 +519,18 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		if not cls.residencies:
 			return 0
 		cls.loader.error = None
-		l0_residency = cls.residencies[0]
-		dims = np.asarray(l0_residency.dims, dtype=np.int64)
-		focus_voxel = np.asarray(focus, dtype=np.float64) * cls.voxels_per_unit
+		# The chunk search runs in level 0 chunks, which `LEVELS` need not
+		# stream, so the grid comes from the volume's own shape.
+		dims = np.asarray(bricks.grid_dims(cls.shape_xyz), dtype=np.int64)
+		focus_voxel = cls.to_volume_voxels(
+			np.asarray(focus, dtype=np.float64) * cls.voxels_per_unit
+		)
 		cls.last_focus_voxel = focus_voxel
 
 		# Search the full multilevel reach in L0 space. Each level takes its
 		# nearest candidates; only the remainder is collapsed into the next level.
 		focus_chunk = focus_voxel / bricks.BRICK_CORE
-		radius = bricks.FOCUS_RADIUS_CHUNKS * (1 << bricks.LEVEL_CAP)
+		radius = bricks.FOCUS_RADIUS_CHUNKS * (1 << bricks.LEVELS[-1])
 		lo_chunk = np.clip(np.floor(focus_chunk - radius), 0, dims - 1)
 		hi_chunk = np.clip(np.ceil(focus_chunk + radius), 0, dims - 1)
 		lo = lo_chunk * bricks.BRICK_CORE
@@ -508,16 +551,19 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			positions, indices = arrays
 			matrix = np.asarray(instance.matrix_world, dtype=np.float64)
 			world = positions @ matrix[:3, :3].T + matrix[:3, 3]
-			chunks = bricks.chunks_near(world * cls.voxels_per_unit, indices, lo, hi)
+			# The chunks a triangle covers are the ones it covers in the loaded
+			# volume, which an affine leaves a triangle in all the same.
+			voxels = cls.to_volume_voxels(world * cls.voxels_per_unit)
+			chunks = bricks.chunks_near(voxels, indices, lo, hi)
 			if len(chunks):
 				found.append(chunks)
 
 		if not found:
 			for residency in cls.residencies.values():
 				residency.evict_outside(set())
-			cls.wanted = {level: frozenset() for level in bricks.ACTIVE_LEVELS}
+			cls.wanted = {level: frozenset() for level in bricks.LEVELS}
 			cls.pending_levels = {}
-			cls.fallback_keys = {level: set() for level in bricks.ACTIVE_LEVELS}
+			cls.fallback_keys = {level: set() for level in bricks.LEVELS}
 			cls.loader.cancel_unwanted(set())
 			cls.request_redraw()
 			return 0
@@ -525,40 +571,43 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		chunks = np.clip(np.concatenate(found), 0, dims - 1)
 		selected = bricks.select_lod_chunks(
 			chunks,
-			{level: cls.residencies[level].dims for level in bricks.ACTIVE_LEVELS},
+			{level: cls.residencies[level].dims for level in bricks.LEVELS},
 			focus_voxel,
 		)
 
 		cls.wanted = {
 			level: frozenset(int(k) for k in selected[level][0])
-			for level in bricks.ACTIVE_LEVELS
+			for level in bricks.LEVELS
 		}
 		cls.pending_levels = {}
-		cls.fallback_keys = {level: set() for level in bricks.ACTIVE_LEVELS}
+		cls.fallback_keys = {level: set() for level in bricks.LEVELS}
 		# Reapply occupancy learned by earlier targets before queuing any reads.
-		for level in bricks.ACTIVE_LEVELS:
+		for level in bricks.LEVELS:
 			for key in tuple(cls.wanted[level] & cls.empty_chunks[level]):
 				cls.mark_empty(level, key, reschedule=False)
-		for level in bricks.ACTIVE_LEVELS:
+		for level in bricks.LEVELS:
 			cls.residencies[level].evict_outside(cls.wanted[level])
 		# Frees the worker pool from stale reads queued by an earlier retarget
 		# (e.g. mid-drag) before dispatching this round's requests.
 		wanted_requests = {
-			(level, key) for level in bricks.ACTIVE_LEVELS for key in cls.wanted[level]
+			(level, key) for level in bricks.LEVELS for key in cls.wanted[level]
 		}
 		cls.loader.cancel_unwanted(wanted_requests)
-		for level in bricks.ACTIVE_LEVELS:
+		for level in bricks.LEVELS:
 			pending = cls.missing_requests(level)
-			if level == 0:
+			# The coarsest level goes out at once, so the whole mesh has
+			# something on it as soon as possible; the finer ones wait their
+			# turn and sharpen it from the cursor outwards.
+			if level == bricks.LOAD_ORDER[0]:
 				for key, coord in pending:
-					cls.loader.request(0, key, coord)
+					cls.loader.request(level, key, coord)
 				continue
 			if pending:
 				cls.pending_levels[level] = pending
 		cls.queue_next_level_if_ready()
 
 		cls.request_redraw()
-		return sum(len(cls.wanted[level]) for level in bricks.ACTIVE_LEVELS)
+		return sum(len(cls.wanted[level]) for level in bricks.LEVELS)
 
 	@classmethod
 	def key_distance(cls, level, key):
@@ -587,10 +636,14 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.fallback_keys[level].discard(key)
 		cls.residencies[level].evict_outside(cls.wanted[level])
 
-		next_level = level + 1
-		if next_level not in cls.residencies:
+		next_level = bricks.next_level(level)
+		if next_level is None:
 			return
-		coord = np.asarray(cls.residencies[level].chunk_xyz(key), dtype=np.int64) // 2
+		# Collapsing onto the next level's grid takes one halving per level
+		# skipped between the two.
+		coord = np.asarray(
+			cls.residencies[level].chunk_xyz(key), dtype=np.int64
+		) >> (next_level - level)
 		next_residency = cls.residencies[next_level]
 		coord = np.clip(coord, 0, np.asarray(next_residency.dims) - 1)
 		parent = int(next_residency.keys_of(coord.reshape(1, 3))[0])
@@ -618,17 +671,20 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		if reschedule:
 			wanted_requests = {
 				(active_level, wanted_key)
-				for active_level in bricks.ACTIVE_LEVELS
+				for active_level in bricks.LEVELS
 				for wanted_key in cls.wanted[active_level]
 			}
 			cls.loader.cancel_unwanted(wanted_requests)
 
 	@classmethod
 	def queue_next_level_if_ready(cls):
-		"""Start the next coarser level once all earlier work is drained."""
+		"""Start the next level in `LOAD_ORDER` once all earlier work is drained."""
 		if not cls.pending_levels or not cls.loader.idle():
 			return
-		level = min(cls.pending_levels)
+		level = next(
+			candidate for candidate in bricks.LOAD_ORDER
+			if candidate in cls.pending_levels
+		)
 		pending = cls.pending_levels.pop(level)
 		for key, coord in pending:
 			if key in cls.wanted[level] and key not in cls.residencies[level].slot_of:
@@ -656,7 +712,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 		# After the uploads, so the page table never points at a slot whose
 		# brick has not been written yet.
-		for level in bricks.ACTIVE_LEVELS:
+		for level in bricks.LEVELS:
 			residency = cls.residencies[level]
 			if residency.dirty:
 				cls.atlases[level].sync_page(residency.page)
@@ -718,8 +774,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		gpu.state.depth_test_set('LESS_EQUAL')
 		gpu.state.depth_mask_set(True)
 
-		self.shader.uniform_sampler("volume", self.volume)
-		for level in bricks.ACTIVE_LEVELS:
+		for level in bricks.LEVELS:
 			self.shader.uniform_sampler(
 				"l%dAtlas" % level, self.atlases[level].texture
 			)

@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory() as tmp:
     while E.get_volume() is None:
         assert time.monotonic() < deadline, E.status()
         time.sleep(.01)
-    assert E.coarse.shape == (4,4,4)
+    assert len(E.pyramid) == 6
     assert bpy.ops.velend.setup_scene() == {'FINISHED'}
     assert bpy.data.objects.get('Cut X')
     assert tuple(bpy.context.scene.cursor.location) != (0,0,0)

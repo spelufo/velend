@@ -22,16 +22,25 @@ BRICK_CORE = 64
 BRICK_PAD = 1
 BRICK_SIZE = BRICK_CORE + 2 * BRICK_PAD
 
-# Stream levels zero through this level. Level 5 remains the whole-volume
-# fallback. Lowering this constant also removes the disabled levels from the
-# compiled fragment shader and avoids allocating any of their GPU resources.
-FALLBACK_LEVEL = 5
-LEVEL_CAP = 4
+# The pyramid levels to render from, finest first. Every level streams through
+# its own atlas; there is no whole-volume texture behind them. Any strictly
+# increasing subset of the pyramid's levels works, and the levels left out are
+# removed from the compiled fragment shader along with their GPU resources.
+LEVELS = (0, 1, 2, 3, 4, 5)
 
-# Decimal megabytes available to each L0..L4 R8 atlas. Page tables and the one
-# short-lived staging brick are not part of these budgets. The defaults derive
-# 12^3, 10^3, 8^3, 6^3, and 4^3 slots respectively (~1.01GB in total).
-ATLAS_MEMORY_MB = (500, 300, 150, 64, 20)
+# The order the levels are streamed in: coarsest first, so the mesh is covered
+# end to end within a few reads and then sharpens inwards from the cursor as
+# the finer levels land on top. Loading it the other way round leaves the mesh
+# blank outside the finest level's reach until the whole pyramid has arrived.
+LOAD_ORDER = tuple(reversed(LEVELS))
+
+# Decimal megabytes available to each level's R8 atlas, indexed by level. Page
+# tables and the one short-lived staging brick are not part of these budgets.
+# The defaults derive 12^3, 10^3, 8^3, 6^3, 4^3 and 6^3 slots respectively
+# (~1.07GB in total). The coarsest level is what covers the parts of a mesh the
+# finer ones cannot reach, so its atlas wants room for the whole level: a scroll
+# is about 4x4x8 chunks at level 5.
+ATLAS_MEMORY_MB = (200, 150, 100, 64, 64, 64)
 
 
 def atlas_slots_per_axis(memory_mb):
@@ -51,18 +60,21 @@ def atlas_slots_per_axis(memory_mb):
 	return slots
 
 
-if not 0 <= LEVEL_CAP < FALLBACK_LEVEL:
-	raise ValueError("LEVEL_CAP must be between 0 and 4")
-if len(ATLAS_MEMORY_MB) < FALLBACK_LEVEL:
-	raise ValueError("ATLAS_MEMORY_MB must provide budgets for L0 through L4")
+if not LEVELS:
+	raise ValueError("LEVELS must name at least one level")
+if any(b <= a for a, b in zip(LEVELS, LEVELS[1:])):
+	raise ValueError("LEVELS must be strictly increasing")
+if not all(0 <= level < len(ATLAS_MEMORY_MB) for level in LEVELS):
+	raise ValueError(f"ATLAS_MEMORY_MB only provides budgets for L0 through L{len(ATLAS_MEMORY_MB) - 1}")
 
-ACTIVE_LEVELS = tuple(range(LEVEL_CAP + 1))
-SLOTS_PER_AXIS = tuple(atlas_slots_per_axis(ATLAS_MEMORY_MB[level]) for level in ACTIVE_LEVELS)
-SLOT_COUNTS = tuple(n ** 3 for n in SLOTS_PER_AXIS)
-ATLAS_DIMS = tuple(n * BRICK_SIZE for n in SLOTS_PER_AXIS)
+# Keyed by level rather than by position, because a level is no longer its own
+# index once LEVELS is a subset.
+SLOTS_PER_AXIS = {level: atlas_slots_per_axis(ATLAS_MEMORY_MB[level]) for level in LEVELS}
+SLOT_COUNTS = {level: n ** 3 for level, n in SLOTS_PER_AXIS.items()}
+ATLAS_DIMS = {level: n * BRICK_SIZE for level, n in SLOTS_PER_AXIS.items()}
 
-# The combined working set reaches this many chunks at the coarsest streamed
-# level. Each increase in LEVEL_CAP therefore doubles its physical reach.
+# The combined working set reaches this many chunks at the coarsest level in
+# LEVELS, so `1 << LEVELS[-1]` level 0 chunks.
 FOCUS_RADIUS_CHUNKS = 40
 
 # Bricks uploaded per redraw. Each one is a staging texture plus a compute
@@ -76,29 +88,39 @@ LOADER_THREADS = 6
 EMPTY_BRICK = object()
 
 
+def next_level(level):
+	"""The level after `level` in LEVELS, or None when it is the coarsest."""
+	index = LEVELS.index(level)
+	return LEVELS[index + 1] if index + 1 < len(LEVELS) else None
+
+
 def grid_dims(shape_xyz):
 	"""Number of chunks along each axis needed to cover the volume."""
 	return tuple(int(-(-int(s) // BRICK_CORE)) for s in shape_xyz)
 
 
 def select_lod_chunks(chunks, level_dims, focus_voxel, slot_counts=None):
-	"""Cascade mesh-intersecting L0 chunks through the streamed levels.
+	"""Spread mesh-intersecting L0 chunks over the levels being rendered.
 
-	Each level takes its nearest candidates up to capacity. Its overflow is
-	collapsed by two on every axis and becomes the next level's candidates.
+	Every level sees the whole set, collapsed onto its own grid, and keeps as
+	many of its nearest chunks as its atlas has slots. The levels overlap
+	rather than partition: the coarsest covers as much of the mesh as it can
+	reach, and each finer one refines a smaller neighbourhood of the focus.
+	The fragment shader samples finest-resident-first, so wherever a finer
+	level has arrived it is the one that shows.
 	Returns ``{level: (keys, coords_xyz)}`` for every supplied level.
 	"""
 	levels = tuple(sorted(level_dims))
-	if not levels or levels != tuple(range(len(levels))):
-		raise ValueError("level_dims must contain consecutive levels starting at 0")
+	if not levels:
+		raise ValueError("level_dims must name at least one level")
 	if slot_counts is None:
-		slot_counts = SLOT_COUNTS[:len(levels)]
+		slot_counts = [SLOT_COUNTS[level] for level in levels]
 	if len(slot_counts) != len(levels):
 		raise ValueError("slot_counts must match level_dims")
 
 	dims = {level: np.asarray(level_dims[level], dtype=np.int64) for level in levels}
 	focus_voxel = np.asarray(focus_voxel, dtype=np.float64)
-	chunks = np.clip(np.asarray(chunks, dtype=np.int64), 0, dims[0] - 1)
+	chunks = np.asarray(chunks, dtype=np.int64)
 	selected = {}
 	if not len(chunks):
 		for level in levels:
@@ -107,9 +129,10 @@ def select_lod_chunks(chunks, level_dims, focus_voxel, slot_counts=None):
 			)
 		return selected
 
-	candidates = chunks
 	for level, capacity in zip(levels, slot_counts):
-		candidates = np.clip(candidates, 0, dims[level] - 1)
+		# `chunks` arrives in level 0 chunk coordinates, and one chunk of this
+		# level spans `1 << level` of them along each axis.
+		candidates = np.clip(chunks >> level, 0, dims[level] - 1)
 		nx, ny, _ = (int(d) for d in dims[level])
 		keys = np.unique(
 			(candidates[:, 2] * ny + candidates[:, 1]) * nx + candidates[:, 0]
@@ -121,21 +144,8 @@ def select_lod_chunks(chunks, level_dims, focus_voxel, slot_counts=None):
 		nearest = np.argsort(
 			np.linalg.norm(centers_l0 - focus_voxel, axis=1), kind='stable'
 		)
-		ordered_keys = keys[nearest]
-		ordered_coords = coords[nearest]
-		count = min(len(ordered_keys), int(capacity))
-		selected[level] = (ordered_keys[:count], ordered_coords[:count])
-		overflow = ordered_coords[count:]
-		if level == levels[-1]:
-			break
-		if len(overflow):
-			candidates = overflow // 2
-		else:
-			for coarser in levels[level + 1:]:
-				selected[coarser] = (
-					np.zeros(0, dtype=np.int64), np.zeros((0, 3), dtype=np.int64)
-				)
-			break
+		count = min(len(keys), int(capacity))
+		selected[level] = (keys[nearest][:count], coords[nearest][:count])
 	return selected
 
 

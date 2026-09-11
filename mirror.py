@@ -21,6 +21,7 @@ _LOCKS = weakref.WeakValueDictionary()
 _METADATA = {'.zarray', '.zattrs', '.zgroup', '.zmetadata', 'zarr.json'}
 _GIB = 1 << 30
 
+LOG_MIRROR_OPS = True
 
 def _object_lock(path):
     with _LOCKS_GUARD:
@@ -274,6 +275,8 @@ class MirrorStore(LocalStore):
                     expected = response.headers.get('Content-Length')
                     if expected is not None and count != int(expected):
                         raise OSError('Incomplete HTTP transfer')
+            if LOG_MIRROR_OPS:
+                print(f"velend: Saving {path}")
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -292,11 +295,14 @@ class MirrorStore(LocalStore):
                 with _NETWORK:
                     if not self.online():
                         raise OSError("Network access is disabled in Blender")
-                    request = urllib.request.Request(self.source_url + '/' + urllib.parse.quote(key, safe='/'),
-                                                     headers={'Accept-Encoding': 'identity'})
+                    url = self.source_url + '/' + urllib.parse.quote(key, safe='/')
+                    request = urllib.request.Request(url, headers={'Accept-Encoding': 'identity'})
                     try:
+                        if LOG_MIRROR_OPS:
+                            print("velend: Requesting", url)
                         with urllib.request.urlopen(request, timeout=30) as response:
                             if response.status != 200:
+                                print("velend: Downloading ", key, "failed, response status", response.status)
                                 raise OSError('Expected complete HTTP object, got %s' % response.status)
                             if path.name not in _METADATA:
                                 # What keeps a Zarr readable is exempt: VC3D's
