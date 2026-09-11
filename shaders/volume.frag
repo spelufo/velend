@@ -4,9 +4,9 @@
 
 // Samples averaged along the normal, and their spacing in level 0 voxels.
 // Averaging across the face thins out the noise the surface is embedded in.
-#define NORMAL_SAMPLES 5
+#define NORMAL_SAMPLES 10
 const float SAMPLE_DELTA = 1.0f;
-const float SAMPLE_OFFSET = 0.5f;
+const float SAMPLE_OFFSET = 0.5;
 
 // One level's lookup: level 0 coordinate in, the atlas texel it lands on out.
 // `scale` takes the coordinate into this level's voxels, the page table says
