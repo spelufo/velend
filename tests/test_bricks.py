@@ -192,5 +192,130 @@ class BrickTests(unittest.TestCase):
 		self.assertEqual(residency.place(4), 0)
 
 
+def quad(lo, hi):
+	"""One axis aligned rectangle in the z = lo[2] plane, as (voxels, indices)."""
+	voxels = np.array([
+		[lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]],
+		[hi[0], hi[1], lo[2]], [lo[0], hi[1], lo[2]],
+	], dtype=np.float64)
+	return voxels, np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+
+
+def slab_planes(axis, lo, hi):
+	"""A frustum that is just the `lo <= x[axis] <= hi` slab, in voxels."""
+	planes = np.zeros((6, 4), dtype=np.float64)
+	# The four unused sides sit far enough out to admit anything.
+	planes[:4, 0] = [1.0, -1.0, 0.0, 0.0]
+	planes[:4, 1] = [0.0, 0.0, 1.0, -1.0]
+	planes[:4, 3] = 1e9
+	planes[4, axis], planes[4, 3] = 1.0, -lo
+	planes[5, axis], planes[5, 3] = -1.0, hi
+	return planes
+
+
+class FrustumTests(unittest.TestCase):
+	def test_identity_projection_is_the_ndc_cube(self):
+		planes = bricks.frustum_planes(np.eye(4))
+		points = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, -1.5]])
+		self.assertEqual(
+			list(bricks.boxes_visible([planes], points, 0.0)), [True, False, False]
+		)
+
+	def test_margin_grows_the_frustum(self):
+		points = np.array([[2.0, 0.0, 0.0]])
+		planes = bricks.frustum_planes(np.eye(4), margin=1.5)
+		self.assertTrue(bricks.boxes_visible([planes], points, 0.0)[0])
+		self.assertFalse(
+			bricks.boxes_visible([bricks.frustum_planes(np.eye(4))], points, 0.0)[0]
+		)
+
+	def test_a_box_straddling_a_plane_stays_visible(self):
+		planes = bricks.frustum_planes(np.eye(4))
+		centers = np.array([[1.5, 0.0, 0.0]])
+		self.assertFalse(bricks.boxes_visible([planes], centers, 0.4)[0])
+		self.assertTrue(bricks.boxes_visible([planes], centers, 0.6)[0])
+
+	def test_planes_carried_into_voxels_agree_with_world_space(self):
+		to_voxels = np.eye(4)
+		to_voxels[:3, :3] *= 10.0
+		to_voxels[:3, 3] = [100.0, -50.0, 7.0]
+		world = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.5, -0.5, 0.5]])
+		voxels = world @ to_voxels[:3, :3].T + to_voxels[:3, 3]
+		in_world = bricks.boxes_visible([bricks.frustum_planes(np.eye(4))], world, 0.0)
+		in_voxels = bricks.boxes_visible(
+			[bricks.frustum_planes(np.eye(4), to_voxels)], voxels, 0.0
+		)
+		self.assertEqual(list(in_world), list(in_voxels))
+
+	def test_planes_are_normalised_so_the_margin_is_a_distance(self):
+		to_voxels = np.eye(4)
+		to_voxels[:3, :3] *= 10.0
+		planes = bricks.frustum_planes(np.eye(4), to_voxels)
+		np.testing.assert_allclose(np.linalg.norm(planes[:, :3], axis=1), 1.0)
+
+	def test_a_degenerate_matrix_culls_nothing(self):
+		self.assertIsNone(bricks.frustum_planes(np.zeros((4, 4))))
+		self.assertIsNone(bricks.frustum_planes(np.eye(4), np.zeros((4, 4))))
+
+	def test_no_frusta_leaves_everything_visible(self):
+		centers = np.array([[0.0, 0.0, 0.0], [1e6, 0.0, 0.0]])
+		self.assertEqual(list(bricks.boxes_visible([], centers, 0.0)), [True, True])
+
+
+class ChunkCullingTests(unittest.TestCase):
+	CORE = bricks.BRICK_CORE
+
+	def near(self, voxels, indices, planes_list=()):
+		hi = 16.0 * self.CORE
+		return bricks.chunks_near(voxels, indices, 0.0, hi, planes_list)
+
+	def keys(self, chunks):
+		return {tuple(int(c) for c in chunk) for chunk in chunks}
+
+	def test_culling_off_is_the_behaviour_it_always_had(self):
+		voxels, indices = quad((0.0, 0.0, 0.0), (4.0 * self.CORE, 4.0 * self.CORE, 0.0))
+		np.testing.assert_array_equal(
+			self.near(voxels, indices), self.near(voxels, indices, ())
+		)
+
+	def test_chunks_outside_the_frustum_are_dropped(self):
+		voxels, indices = quad((0.0, 0.0, 0.0), (4.0 * self.CORE, 4.0 * self.CORE, 0.0))
+		planes = slab_planes(0, 0.0, 1.5 * self.CORE)
+		kept = self.keys(self.near(voxels, indices, [planes]))
+		self.assertTrue(kept)
+		self.assertLess(len(kept), len(self.keys(self.near(voxels, indices))))
+		self.assertTrue(kept <= self.keys(self.near(voxels, indices)))
+		self.assertEqual({chunk[0] for chunk in kept}, {0, 1})
+
+	def test_a_volume_spanning_triangle_is_culled_by_its_chunks(self):
+		# The cut planes the setup operator makes are single quads covering the
+		# whole volume: no frustum can reject their bounding box, so the chunk
+		# pass is the only thing that keeps them from filling the atlases.
+		voxels, indices = quad(
+			(0.0, 0.0, 8.0 * self.CORE), (16.0 * self.CORE, 16.0 * self.CORE, 8.0 * self.CORE)
+		)
+		planes = slab_planes(1, 3.25 * self.CORE, 4.5 * self.CORE)
+		kept = self.keys(self.near(voxels, indices, [planes]))
+		self.assertEqual({chunk[1] for chunk in kept}, {3, 4})
+		self.assertEqual(len({chunk[0] for chunk in kept}), 17)
+
+	def test_two_frusta_keep_the_union(self):
+		voxels, indices = quad((0.0, 0.0, 0.0), (8.0 * self.CORE, 1.0, 0.0))
+		left = slab_planes(0, 0.0, 0.5 * self.CORE)
+		right = slab_planes(0, 6.25 * self.CORE, 6.5 * self.CORE)
+		both = self.keys(self.near(voxels, indices, [left, right]))
+		self.assertEqual(
+			both,
+			self.keys(self.near(voxels, indices, [left]))
+			| self.keys(self.near(voxels, indices, [right])),
+		)
+		self.assertEqual({chunk[0] for chunk in both}, {0, 6})
+
+	def test_a_frustum_missing_the_mesh_entirely_keeps_nothing(self):
+		voxels, indices = quad((0.0, 0.0, 0.0), (4.0 * self.CORE, 4.0 * self.CORE, 0.0))
+		planes = slab_planes(2, 100.0 * self.CORE, 101.0 * self.CORE)
+		self.assertEqual(len(self.near(voxels, indices, [planes])), 0)
+
+
 if __name__ == "__main__":
 	unittest.main()

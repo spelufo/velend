@@ -80,22 +80,21 @@ network = "Download public volume metadata and missing Zarr mirror objects"
 # Advanced build settings.
 # https://docs.blender.org/manual/en/latest/advanced/command_line/extension_arguments.html#command-line-args-extension-build
 [build]
-# The first three are Blender's defaults. The rest is development-only material
-# that a downloaded extension has no use for.
 paths_exclude_pattern = [
+  # An allowlist, spelled as gitignore-style patterns: drop everything at the
+  # top level, then take back the few things a user needs. Anything new in the
+  # working tree — scratch files, notes, the blender/ and villa/ checkouts,
+  # editor state — stays out without anyone having to remember to list it.
+  # blender_manifest.toml and the wheels/ the manifest lists are added by
+  # Blender itself, so they need no entry here.
+  "/*",
+  "!/*.py",
+  "!/shaders",
+  "!/README.md",
+  "!/MANUAL.md",
+  "!/CHANGELOG.md",
+  "!/LICENSE",
+  # Below the top level, where "/*" doesn't reach.
   "__pycache__/",
-  "/.git/",
-  "/*.zip",
-  "/build/",
-  "/blender/",
-  "/convos/",
-  "/.claude/",
   ".DS_Store",
-  "/scripts/",
-  "/tests/",
-  "/.gitignore",
-  "/AGENTS.md",
-  "/CLAUDE.md",
-  "/TODO.md",
-  "/requirements.txt",
 ]

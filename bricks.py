@@ -77,6 +77,11 @@ ATLAS_DIMS = {level: n * BRICK_SIZE for level, n in SLOTS_PER_AXIS.items()}
 # LEVELS, so `1 << LEVELS[-1]` level 0 chunks.
 FOCUS_RADIUS_CHUNKS = 40
 
+# The view frustum is dilated by this many level 0 chunks on every side before
+# the working set is chosen, so that a small orbit or pan does not evict the
+# bricks that are about to swing back into view.
+FRUSTUM_MARGIN_CHUNKS = 4
+
 # Bricks uploaded per redraw. Each one is a staging texture plus a compute
 # dispatch, so a handful per frame keeps the viewport responsive while the
 # rest of the working set streams in over the following frames.
@@ -331,12 +336,89 @@ class Residency:
 		self.dirty = True
 
 
-def chunks_near(voxels, indices, lo, hi):
+def frustum_planes(view_projection, to_voxels=None, margin=0.0):
+	"""The six half spaces of a view frustum, as rows of `(nx, ny, nz, d)`.
+
+	`view_projection` is the row major matrix taking a world point to clip
+	space, the way Blender's `RegionView3D.perspective_matrix` does, so that
+	`clip = matrix @ [x, y, z, 1]`. The planes come out of it by the usual
+	sum and difference of its rows: a point is inside the frustum when
+	`normal . point + d >= 0` holds for all six.
+
+	`to_voxels` is the affine taking a world point into the coordinates the
+	planes should be expressed in -- the loaded volume's level 0 voxels, for
+	the chunk tests below. A plane row `q` reads a world point as
+	`q . (inv(to_voxels) @ [voxel, 1])`, so carrying it across is a right
+	multiplication by the inverse. The rows are normalised afterwards, which
+	makes `margin` a distance in those same coordinates: it pushes every plane
+	outwards, growing the frustum.
+
+	Returns None when the matrix cannot be inverted or the extraction degenerates,
+	which callers read as "cull nothing".
+	"""
+	matrix = np.asarray(view_projection, dtype=np.float64)
+	if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+		return None
+	planes = np.stack([
+		matrix[3] + matrix[0], matrix[3] - matrix[0],
+		matrix[3] + matrix[1], matrix[3] - matrix[1],
+		matrix[3] + matrix[2], matrix[3] - matrix[2],
+	])
+	if to_voxels is not None:
+		to_voxels = np.asarray(to_voxels, dtype=np.float64)
+		try:
+			planes = planes @ np.linalg.inv(to_voxels)
+		except np.linalg.LinAlgError:
+			return None
+	norms = np.linalg.norm(planes[:, :3], axis=1)
+	if not np.all(np.isfinite(planes)) or np.any(norms <= 0.0):
+		return None
+	planes = planes / norms[:, None]
+	planes[:, 3] += float(margin)
+	return planes
+
+
+def boxes_visible(planes_list, centers, half_extents):
+	"""Which axis aligned boxes fall inside at least one of the frusta.
+
+	The test is the conservative one: a box is outside a plane only when even
+	the corner furthest along the plane's normal is behind it, which is
+	`normal . center + d + |normal| . half < 0`. A box that merely straddles a
+	plane counts as visible, so nothing is culled that could still show.
+
+	`planes_list` is a sequence of `(6, 4)` plane arrays, one per viewport. An
+	empty sequence means nothing is culled, which is what callers hand over
+	when no view is known yet.
+	"""
+	centers = np.asarray(centers, dtype=np.float64)
+	if not len(planes_list):
+		return np.ones(len(centers), dtype=bool)
+	half_extents = np.broadcast_to(
+		np.asarray(half_extents, dtype=np.float64), centers.shape
+	)
+	visible = np.zeros(len(centers), dtype=bool)
+	for planes in planes_list:
+		normals = planes[:, :3]
+		# (N, 6): the signed distance of each box's furthest corner, per plane.
+		reach = centers @ normals.T + half_extents @ np.abs(normals).T + planes[:, 3]
+		visible |= np.all(reach >= 0.0, axis=1)
+	return visible
+
+
+def chunks_near(voxels, indices, lo, hi, planes_list=()):
 	"""Chunk coords touched by the triangles, restricted to the [lo, hi] voxel box.
 
 	Each triangle contributes the chunks its bounding box overlaps, which is a
 	superset of the chunks it actually crosses. Over-inclusion only costs a few
 	slots; missing a chunk would show up as an untextured patch.
+
+	`planes_list` optionally holds the view frusta from `frustum_planes`, in
+	these same voxel coordinates, and drops the chunks outside all of them. It
+	is applied twice: to the triangle boxes, which keeps the expansion below
+	small, and then to the chunks themselves. The second pass is the one that
+	does the work -- a cut plane spanning the whole volume is a single triangle
+	whose box no frustum can reject, yet only the chunks it crosses in view are
+	worth loading.
 	"""
 	if len(indices) == 0:
 		return np.zeros((0, 3), dtype=np.int64)
@@ -345,6 +427,10 @@ def chunks_near(voxels, indices, lo, hi):
 	tri_lo = tris.min(axis=1)
 	tri_hi = tris.max(axis=1)
 	inside = np.all(tri_hi >= lo, axis=1) & np.all(tri_lo <= hi, axis=1)
+	if len(planes_list):
+		inside &= boxes_visible(
+			planes_list, 0.5 * (tri_lo + tri_hi), 0.5 * (tri_hi - tri_lo)
+		)
 	if not inside.any():
 		return np.zeros((0, 3), dtype=np.int64)
 
@@ -365,7 +451,7 @@ def chunks_near(voxels, indices, lo, hi):
 	offset = np.arange(total) - np.repeat(starts, counts)
 	span_x = spans[owner, 0]
 	span_y = spans[owner, 1]
-	return cmin[owner] + np.stack(
+	chunks = cmin[owner] + np.stack(
 		[
 			offset % span_x,
 			(offset // span_x) % span_y,
@@ -373,3 +459,8 @@ def chunks_near(voxels, indices, lo, hi):
 		],
 		axis=1,
 	)
+	if len(planes_list):
+		chunks = chunks[boxes_visible(
+			planes_list, (chunks + 0.5) * BRICK_CORE, 0.5 * BRICK_CORE
+		)]
+	return chunks

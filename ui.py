@@ -210,6 +210,12 @@ def _resolution_updated(self, context):
 	VolumeSamplerRenderEngine.rescale()
 
 
+def _frustum_culling_updated(self, context):
+	# Not a shader define, unlike the toggle below: it only changes which bricks
+	# the next working set asks for.
+	VolumeSamplerRenderEngine.retarget_now()
+
+
 def _debug_level_colors_updated(self, context):
 	# The flag is a compile time define in the fragment shader, so the shaders
 	# have to be built again for the toggle to show.
@@ -678,6 +684,18 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		precision=3,
 		update=_resolution_updated,
 	)
+	frustum_culling: bpy.props.BoolProperty(
+		name="Frustum Culling",
+		description=(
+			"Only stream the bricks that fall inside a 3D viewport's view "
+			"frustum, so the atlases and the download bandwidth go to what is "
+			"on screen. Turn it off to keep the whole mesh loaded no matter "
+			"where you are looking"
+		),
+		default=True,
+		options=set(),
+		update=_frustum_culling_updated,
+	)
 	debug_level_colors: bpy.props.BoolProperty(
 		name="Level Colors",
 		description=(
@@ -745,6 +763,7 @@ class SCENE_PT_velend(bpy.types.Panel):
 		debug = layout.column()
 		debug.use_property_split = True
 		debug.use_property_decorate = False
+		debug.prop(settings, "frustum_culling")
 		debug.prop(settings, "debug_level_colors")
 
 		row = layout.row(align=True)

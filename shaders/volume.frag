@@ -4,7 +4,7 @@
 
 // Samples averaged along the normal, and their spacing in level 0 voxels.
 // Averaging across the face thins out the noise the surface is embedded in.
-#define NORMAL_SAMPLES 10
+#define NORMAL_SAMPLES 5
 const float SAMPLE_DELTA = 1.0f;
 const float SAMPLE_OFFSET = 0.5;
 

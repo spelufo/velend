@@ -23,6 +23,11 @@ _STREAM_WATCH_INTERVAL = 0.05
 # The 3D cursor is tool state, not depsgraph data, so moving it never reaches
 # `view_update`; polling is the same trick used above for the other two.
 _CURSOR_WATCH_INTERVAL = 0.1
+# Orbiting the viewport changes which bricks are wanted but only ever reaches
+# `view_draw`, and retargeting from there would walk every mesh on each frame of
+# the drag. The view matrices are recorded as they are drawn with and this timer
+# retargets once they have stopped changing.
+_VIEW_WATCH_INTERVAL = 0.1
 
 class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	bl_idname = "VOLUME_SAMPLER"
@@ -84,6 +89,16 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	# Rebuilt only when the geometry of the scene changes.
 	batches = {}
 	meshes = {}
+
+	# The matrix the viewport this instance draws was last drawn with, as a plain
+	# tuple: hashable, and it keeps no reference to Blender's own data. Set per
+	# instance by `view_draw`; the class level None covers the instances that
+	# have not drawn yet and the UV editor, which has no 3D view to cull against.
+	frustum_matrix = None
+	# The view matrices `_watch_view` last saw, and whether it has already
+	# retargeted for them.
+	last_view_key = None
+	view_settled = False
 
 	# One instance per viewport that has drawn at least once. `Area.tag_redraw()`
 	# only marks the region dirty, which a RENDERED-shading viewport treats as
@@ -178,6 +193,44 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		return voxels @ matrix[:3, :3].T + matrix[:3, 3]
 
 	@classmethod
+	def world_to_voxels(cls):
+		"""The affine taking a Blender world point to the loaded volume's voxels.
+
+		The two steps `retarget` applies to the mesh positions, composed: the
+		scene's voxel size, and then the transform onto the loaded volume.
+		"""
+		scale = np.eye(4)
+		scale[:3, :3] *= cls.voxels_per_unit
+		return cls.volume_transform @ scale
+
+	@classmethod
+	def view_frusta(cls):
+		"""The frustum of every viewport currently drawing, in volume voxels.
+
+		One entry per live instance that has drawn, dilated by
+		`FRUSTUM_MARGIN_CHUNKS`. A brick is kept when it falls inside any of
+		them, so every open viewport stays textured.
+
+		Empty -- meaning nothing is culled -- while the setting is off, before
+		any viewport has drawn, and for a matrix the planes cannot come out of.
+		`retarget` also runs from operators and from the very first draw, and
+		culling everything there would leave the viewport blank.
+		"""
+		if not cls.settings().frustum_culling:
+			return []
+		to_voxels = cls.world_to_voxels()
+		margin = bricks.FRUSTUM_MARGIN_CHUNKS * bricks.BRICK_CORE
+		frusta = []
+		for instance in cls.live_instances:
+			matrix = instance.frustum_matrix
+			if matrix is None:
+				continue
+			planes = bricks.frustum_planes(matrix, to_voxels, margin)
+			if planes is not None:
+				frusta.append(planes)
+		return frusta
+
+	@classmethod
 	def scene_voxel_bounds(cls):
 		"""The loaded volume's extent as a `(low, high)` pair of corners in the
 		scene's own voxels: the box its corners span brought back through
@@ -244,6 +297,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.fallback_keys = {level: set() for level in bricks.LEVELS}
 		cls.last_focus_voxel = np.zeros(3, dtype=np.float64)
 		cls.last_cursor = None
+		cls.last_view_key = None
+		cls.view_settled = False
 		# The page table dimensions are baked into the fragment shader, so a
 		# volume of a different size needs the shader compiled again.
 		cls.shader = None
@@ -251,12 +306,19 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.batches.clear()
 
 	@classmethod
+	def retarget_now(cls):
+		"""Recompute the working set against the scene as it stands."""
+		if not cls.residencies or cls.pending_reset:
+			return
+		cls.retarget(bpy.context.evaluated_depsgraph_get(), bpy.context.scene.cursor.location)
+
+	@classmethod
 	def rescale(cls):
 		"""Reapply the voxel size to the grid already built, without rebuilding it."""
 		if not cls.residencies or cls.pending_reset:
 			return
 		cls.voxels_per_unit = cls.compute_voxels_per_unit()
-		cls.retarget(bpy.context.evaluated_depsgraph_get(), bpy.context.scene.cursor.location)
+		cls.retarget_now()
 
 	@classmethod
 	def shader_file_mtimes(cls):
@@ -536,6 +598,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		lo = lo_chunk * bricks.BRICK_CORE
 		hi = (hi_chunk + 1) * bricks.BRICK_CORE - 1.0
 
+		# One set of planes for the whole pass: the frusta do not change while it
+		# runs, and extracting them per mesh would just repeat the inversion.
+		planes_list = cls.view_frusta()
+
 		found = []
 		for instance in depsgraph.object_instances:
 			# The iterator can retain hidden instancers and objects whose layer
@@ -554,7 +620,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			# The chunks a triangle covers are the ones it covers in the loaded
 			# volume, which an affine leaves a triangle in all the same.
 			voxels = cls.to_volume_voxels(world * cls.voxels_per_unit)
-			chunks = bricks.chunks_near(voxels, indices, lo, hi)
+			chunks = bricks.chunks_near(voxels, indices, lo, hi, planes_list)
 			if len(chunks):
 				found.append(chunks)
 
@@ -757,6 +823,13 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	def view_draw(self, context, depsgraph):
 		self.live_instances.add(self)
+		# Recorded rather than acted on: `_watch_view` retargets once the view
+		# has settled, so orbiting does not walk every mesh on each frame.
+		region_data = context.region_data
+		if region_data is not None:
+			self.frustum_matrix = tuple(
+				tuple(row) for row in region_data.perspective_matrix
+			)
 		if self.pending_reset:
 			self.apply_reset()
 		first_init = not self.residencies
@@ -833,6 +906,33 @@ def _watch_cursor():
 	return _CURSOR_WATCH_INTERVAL
 
 
+def _watch_view():
+	"""Retarget once the viewports have stopped moving.
+
+	Orbiting reaches `view_draw` alone, and only records the matrix there, so
+	this is what notices. A tick that sees the same matrices as the last one had
+	no navigation between them, which is when the new working set is worth the
+	walk over the scene's meshes.
+	"""
+	cls = VolumeSamplerRenderEngine
+	scene = bpy.context.scene
+	if not cls.residencies or scene is None or not scene.velend.frustum_culling:
+		return _VIEW_WATCH_INTERVAL
+	# `live_instances` is a WeakSet, whose iteration order says nothing, so the
+	# key is sorted rather than taken in the order the instances come out in.
+	key = tuple(sorted(
+		instance.frustum_matrix for instance in cls.live_instances
+		if instance.frustum_matrix is not None
+	))
+	if key != cls.last_view_key:
+		cls.last_view_key = key
+		cls.view_settled = False
+	elif not cls.view_settled:
+		cls.view_settled = True
+		cls.retarget_now()
+	return _VIEW_WATCH_INTERVAL
+
+
 @bpy.app.handlers.persistent
 def _load_post(_file_path):
 	# The engine's state is class level, so it outlives the file it was built
@@ -850,6 +950,8 @@ def register():
 		bpy.app.timers.register(_watch_streaming, persistent=True)
 	if not bpy.app.timers.is_registered(_watch_cursor):
 		bpy.app.timers.register(_watch_cursor, persistent=True)
+	if not bpy.app.timers.is_registered(_watch_view):
+		bpy.app.timers.register(_watch_view, persistent=True)
 
 
 def unregister():
@@ -857,6 +959,8 @@ def unregister():
 	state.close_volume()
 	if _load_post in bpy.app.handlers.load_post:
 		bpy.app.handlers.load_post.remove(_load_post)
+	if bpy.app.timers.is_registered(_watch_view):
+		bpy.app.timers.unregister(_watch_view)
 	if bpy.app.timers.is_registered(_watch_cursor):
 		bpy.app.timers.unregister(_watch_cursor)
 	if bpy.app.timers.is_registered(_watch_streaming):
