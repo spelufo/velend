@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "velend"
-version = "0.2.0"
+version = "0.3.0"
 name = "velend"
 tagline = "Explore the X-ray scans from the Vesuvius Challenge"
 maintainer = "Santiago Pelufo"
