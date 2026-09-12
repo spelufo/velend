@@ -622,6 +622,15 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		precision=3,
 		update=_sampling_updated,
 	)
+	skip_void: bpy.props.BoolProperty(
+		name="Skip Void",
+		description=(
+			"Search up to half the render depth for material before averaging samples"
+		),
+		default=True,
+		options=set(),
+		update=_sampling_updated,
+	)
 
 
 class SCENE_PT_velend(bpy.types.Panel):
@@ -737,6 +746,7 @@ class RENDER_PT_velend_sampling(bpy.types.Panel):
 		column.prop(settings, "render_depth")
 		column.prop(settings, "num_samples")
 		column.prop(settings, "render_depth_offset")
+		column.prop(settings, "skip_void")
 		column.label(
 			text="Sample Distance: %g um" % (
 				settings.render_depth / max(settings.num_samples, 1)

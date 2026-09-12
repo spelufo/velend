@@ -121,19 +121,39 @@ vec3 levelColor(int level) {
 
 void main() {
   float gamma = 0.5;
+  const float threshold = 0.3;
 
   // The face normal, in the same level 0 voxel space the samples are taken in.
   // Derivatives of the interpolated coordinate give it per triangle, which is
   // what we want here: only `position` reaches the shader as an attribute.
   vec3 normal = normalize(cross(dFdx(voxelCoord), dFdy(voxelCoord)));
 
-  float raw = 0.0f;
-#if DEBUG_LEVEL_COLORS
-  int finestLevel = -1;
+  float startDepth = SAMPLE_OFFSET;
+  float firstSample = sampleVolume(voxelCoord - normal * startDepth);
+#if SKIP_VOID
+  // Search at most half the averaging depth for the first non-void sample.
+  bool found = firstSample > threshold;
+  for (int i = 1; i < max(NORMAL_SAMPLES / 2, 1) && !found; i++) {
+    startDepth = SAMPLE_OFFSET + float(i) * SAMPLE_DELTA;
+    firstSample = sampleVolume(voxelCoord - normal * startDepth);
+    found = firstSample > threshold;
+  }
+  if (!found) {
+    startDepth = SAMPLE_OFFSET + float(max(NORMAL_SAMPLES / 2, 1)) * SAMPLE_DELTA;
+    firstSample = sampleVolume(voxelCoord - normal * startDepth);
+  }
 #endif
-  for (int i = 0; i < NORMAL_SAMPLES; i++) {
-    float depth = SAMPLE_OFFSET + float(i) * SAMPLE_DELTA;
-    raw += sampleVolume(voxelCoord - normal * depth);
+
+  float raw = firstSample;
+  float totalWeight = 1.0f;
+#if DEBUG_LEVEL_COLORS
+  int finestLevel = sampledLevel;
+#endif
+  for (int i = 1; i < NORMAL_SAMPLES; i++) {
+    float depth = startDepth + float(i) * SAMPLE_DELTA;
+    float weight = 1.0f - 0.75f * float(i) / float(max(NORMAL_SAMPLES - 1, 1));
+    raw += weight * sampleVolume(voxelCoord - normal * depth);
+    totalWeight += weight;
 #if DEBUG_LEVEL_COLORS
     // The samples straddle a chunk boundary near the edges of a brick, so they
     // don't all come from the same level. Report the finest of them.
@@ -142,7 +162,7 @@ void main() {
     }
 #endif
   }
-  raw /= float(NORMAL_SAMPLES);
+  raw /= totalWeight;
 
 #if DEBUG_LEVEL_COLORS
   if (finestLevel < 0) {
@@ -157,7 +177,7 @@ void main() {
     discard;
   }
   // Masking.
-  // if (raw < 0.27) {
+  // if (raw < threshold) {
   //   raw = 0.0;
   // } else {
   //   //raw = 1.0;
