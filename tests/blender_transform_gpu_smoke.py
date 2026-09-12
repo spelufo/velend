@@ -38,7 +38,7 @@ WIDTH = HEIGHT = 200
 SHIFT_PIXELS = SHIFT / SPAN * WIDTH
 # Columns to check the ramp in. The shader interpolates between voxel centres,
 # so these are picked to land near one rather than between two.
-COLUMNS = (10, 45, 95, 145)
+COLUMNS = (0, 10, 45, 95, 145)
 
 tmp = tempfile.TemporaryDirectory()
 root = Path(tmp.name) / 'volume-1000000um.zarr'
@@ -86,7 +86,10 @@ def draw(offscreen, transform):
 def expected(column):
     """What the shader should draw in one column, from the ramp it samples."""
     voxel = SPAN * (column + 0.5) / WIDTH
-    return (ramp[int(voxel)] / 255.0) ** 2
+    lo = int(voxel)
+    fraction = voxel - lo
+    value = ramp[lo] * (1.0 - fraction) + ramp[min(lo + 1, SIZE - 1)] * fraction
+    return (value / 255.0) ** 2
 
 
 started = time.monotonic()

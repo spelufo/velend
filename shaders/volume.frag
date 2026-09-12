@@ -26,7 +26,8 @@
       (slot / slotsPerAxis) % slotsPerAxis,                                                \
       slot / (slotsPerAxis * slotsPerAxis));                                               \
     vec3 local = clamp(coord - vec3(chunk) * float(BRICK_CORE), 0.0f, float(BRICK_CORE));  \
-    vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local;                  \
+    /* Offset to texel centres, so coordinate 0 is the centre of voxel 0. */                  \
+    vec3 texel = vec3(slotCoord * BRICK_SIZE) + float(BRICK_PAD) + local + 0.5f;           \
     value = texture(atlas, texel / float(atlasDim)).r;                                     \
     return true;                                                                           \
   }

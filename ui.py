@@ -598,7 +598,7 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 	render_depth: bpy.props.FloatProperty(
 		name="Render Depth",
 		description="Total inward sampling depth, in micrometers",
-		default=100.0,
+		default=50.0,
 		min=0.0,
 		soft_max=1000.0,
 		precision=3,
@@ -607,7 +607,7 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 	num_samples: bpy.props.IntProperty(
 		name="Samples",
 		description="Number of volume samples averaged for each surface point",
-		default=10,
+		default=5,
 		min=1,
 		soft_max=64,
 		update=_sampling_updated,
