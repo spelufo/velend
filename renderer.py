@@ -471,11 +471,21 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		shader_info.define("BRICK_CORE", str(bricks.BRICK_CORE))
 		shader_info.define("BRICK_PAD", str(bricks.BRICK_PAD))
 		shader_info.define("BRICK_SIZE", str(bricks.BRICK_SIZE))
+		settings = cls.settings()
+		resolution = settings.resolution or 1.0
+		shader_info.define("NORMAL_SAMPLES", str(max(settings.num_samples, 1)))
+		shader_info.define(
+			"SAMPLE_DELTA",
+			repr(settings.render_depth / max(settings.num_samples, 1) / resolution),
+		)
+		shader_info.define(
+			"SAMPLE_OFFSET", repr(settings.render_depth_offset / resolution)
+		)
 		# The debug view is a whole other branch of the fragment shader rather
 		# than a uniform, so toggling it recompiles: `reload_shaders` is what
 		# the setting calls to make that happen.
 		shader_info.define(
-			"DEBUG_LEVEL_COLORS", "1" if cls.settings().debug_level_colors else "0"
+			"DEBUG_LEVEL_COLORS", "1" if settings.debug_level_colors else "0"
 		)
 		for level in bricks.LEVELS:
 			shader_info.define("L%d_ACTIVE" % level, "1")

@@ -2,11 +2,8 @@
 // instead of shading it. The renderer defines it from the scene's "Level
 // Colors" setting, so the toggle in the panel is what turns it on.
 
-// Samples averaged along the normal, and their spacing in level 0 voxels.
-// Averaging across the face thins out the noise the surface is embedded in.
-#define NORMAL_SAMPLES 5
-const float SAMPLE_DELTA = 1.0f;
-const float SAMPLE_OFFSET = 0.5;
+// Samples averaged inward from the face. The renderer defines their count,
+// spacing, and starting offset in level 0 voxels from physical scene settings.
 
 // One level's lookup: level 0 coordinate in, the atlas texel it lands on out.
 // `scale` takes the coordinate into this level's voxels, the page table says
@@ -134,8 +131,8 @@ void main() {
   int finestLevel = -1;
 #endif
   for (int i = 0; i < NORMAL_SAMPLES; i++) {
-    float offset = (float(i) - float(NORMAL_SAMPLES - 1) * SAMPLE_OFFSET) * SAMPLE_DELTA;
-    raw += sampleVolume(voxelCoord + normal * offset);
+    float depth = SAMPLE_OFFSET + float(i) * SAMPLE_DELTA;
+    raw += sampleVolume(voxelCoord - normal * depth);
 #if DEBUG_LEVEL_COLORS
     // The samples straddle a chunk boundary near the edges of a brick, so they
     // don't all come from the same level. Report the finest of them.

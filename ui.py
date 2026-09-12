@@ -170,6 +170,12 @@ def _debug_level_colors_updated(self, context):
 	VolumeSamplerRenderEngine.reload_shaders()
 
 
+def _sampling_updated(self, context):
+	# The sample count controls a shader loop and the physical distances are
+	# converted to voxel-space constants when the shader is compiled.
+	VolumeSamplerRenderEngine.reload_shaders()
+
+
 # Blender does not copy the strings an enum callback returns, so anything they
 # hand out has to outlive the call. Keeping the last list per property is the
 # usual way around it; without it the menus fill with garbage.
@@ -589,6 +595,33 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		options=set(),
 		update=_debug_level_colors_updated,
 	)
+	render_depth: bpy.props.FloatProperty(
+		name="Render Depth",
+		description="Total inward sampling depth, in micrometers",
+		default=100.0,
+		min=0.0,
+		soft_max=1000.0,
+		precision=3,
+		update=_sampling_updated,
+	)
+	num_samples: bpy.props.IntProperty(
+		name="Samples",
+		description="Number of volume samples averaged for each surface point",
+		default=10,
+		min=1,
+		soft_max=64,
+		update=_sampling_updated,
+	)
+	render_depth_offset: bpy.props.FloatProperty(
+		name="Depth Offset",
+		description=(
+			"Offset of the first sample from the surface, in micrometers; positive "
+			"values move into the surface and negative values move out"
+		),
+		default=0.0,
+		precision=3,
+		update=_sampling_updated,
+	)
 
 
 class SCENE_PT_velend(bpy.types.Panel):
@@ -685,6 +718,32 @@ class SCENE_PT_velend(bpy.types.Panel):
 		row.operator("velend.reload_volume", text="", icon='FILE_REFRESH')
 
 
+class RENDER_PT_velend_sampling(bpy.types.Panel):
+	bl_label = "Volume Sampling"
+	bl_space_type = 'PROPERTIES'
+	bl_region_type = 'WINDOW'
+	bl_context = "render"
+	COMPAT_ENGINES = {VolumeSamplerRenderEngine.bl_idname}
+
+	@classmethod
+	def poll(cls, context):
+		return context.scene.render.engine in cls.COMPAT_ENGINES
+
+	def draw(self, context):
+		settings = context.scene.velend
+		column = self.layout.column()
+		column.use_property_split = True
+		column.use_property_decorate = False
+		column.prop(settings, "render_depth")
+		column.prop(settings, "num_samples")
+		column.prop(settings, "render_depth_offset")
+		column.label(
+			text="Sample Distance: %g um" % (
+				settings.render_depth / max(settings.num_samples, 1)
+			)
+		)
+
+
 @bpy.app.handlers.persistent
 def _load_post(_file_path):
 	"""Bring a file saved before the scene's frame stated a voxel size of its
@@ -716,6 +775,7 @@ def register():
 	bpy.utils.register_class(velend_OT_set_resolution)
 	bpy.utils.register_class(VelendSceneSettings)
 	bpy.utils.register_class(SCENE_PT_velend)
+	bpy.utils.register_class(RENDER_PT_velend_sampling)
 	bpy.types.Scene.velend = bpy.props.PointerProperty(type=VelendSceneSettings)
 	if _load_post not in bpy.app.handlers.load_post:
 		bpy.app.handlers.load_post.append(_load_post)
@@ -725,6 +785,7 @@ def unregister():
 	if _load_post in bpy.app.handlers.load_post:
 		bpy.app.handlers.load_post.remove(_load_post)
 	del bpy.types.Scene.velend
+	bpy.utils.unregister_class(RENDER_PT_velend_sampling)
 	bpy.utils.unregister_class(SCENE_PT_velend)
 	bpy.utils.unregister_class(VelendSceneSettings)
 	bpy.utils.unregister_class(velend_OT_set_resolution)
