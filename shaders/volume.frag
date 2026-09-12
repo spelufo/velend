@@ -127,6 +127,9 @@ void main() {
   // Derivatives of the interpolated coordinate give it per triangle, which is
   // what we want here: only `position` reaches the shader as an attribute.
   vec3 normal = normalize(cross(dFdx(voxelCoord), dFdy(voxelCoord)));
+#if INVERT_SAMPLING_DIRECTION
+  normal = -normal;
+#endif
 
   float startDepth = SAMPLE_OFFSET;
   float firstSample = sampleVolume(voxelCoord - normal * startDepth);

@@ -599,8 +599,8 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		name="Render Depth",
 		description="Total inward sampling depth, in micrometers",
 		default=50.0,
-		min=0.0,
 		soft_max=1000.0,
+		step=1000,
 		precision=3,
 		update=_sampling_updated,
 	)
@@ -620,6 +620,7 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		),
 		default=0.0,
 		precision=3,
+		step=1000,
 		update=_sampling_updated,
 	)
 	skip_void: bpy.props.BoolProperty(
@@ -628,6 +629,13 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 			"Search up to half the render depth for material before averaging samples"
 		),
 		default=True,
+		options=set(),
+		update=_sampling_updated,
+	)
+	invert_sampling_direction: bpy.props.BoolProperty(
+		name="Invert Sampling Direction",
+		description="Sample along the opposite side of the surface normal",
+		default=False,
 		options=set(),
 		update=_sampling_updated,
 	)
@@ -714,14 +722,6 @@ class SCENE_PT_velend(bpy.types.Panel):
 				reload.from_volume_id = settings.scene_volume_id
 				reload.to_volume_id = volume_id
 
-		# A view option rather than something the volume is loaded through, so
-		# it sits with the streaming controls and not with the fields above.
-		debug = layout.column()
-		debug.use_property_split = True
-		debug.use_property_decorate = False
-		debug.prop(settings, "frustum_culling")
-		debug.prop(settings, "debug_level_colors")
-
 		row = layout.row(align=True)
 		row.operator("velend.load_hires")
 		row.operator("velend.reload_volume", text="", icon='FILE_REFRESH')
@@ -747,11 +747,15 @@ class RENDER_PT_velend_sampling(bpy.types.Panel):
 		column.prop(settings, "num_samples")
 		column.prop(settings, "render_depth_offset")
 		column.prop(settings, "skip_void")
+		column.prop(settings, "invert_sampling_direction")
 		column.label(
 			text="Sample Distance: %g um" % (
 				settings.render_depth / max(settings.num_samples, 1)
 			)
 		)
+		column.separator()
+		column.prop(settings, "frustum_culling")
+		column.prop(settings, "debug_level_colors")
 
 
 @bpy.app.handlers.persistent

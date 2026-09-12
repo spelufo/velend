@@ -482,6 +482,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			"SAMPLE_OFFSET", repr(settings.render_depth_offset / resolution)
 		)
 		shader_info.define("SKIP_VOID", "1" if settings.skip_void else "0")
+		shader_info.define(
+			"INVERT_SAMPLING_DIRECTION",
+			"1" if settings.invert_sampling_direction else "0",
+		)
 		# The debug view is a whole other branch of the fragment shader rather
 		# than a uniform, so toggling it recompiles: `reload_shaders` is what
 		# the setting calls to make that happen.
