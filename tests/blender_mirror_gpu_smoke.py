@@ -47,12 +47,23 @@ def tick():
             bpy.context.view_layer.objects.active = obj
             obj.select_set(True)
             obj.data.uv_layers.new(name='UVMap')
-            for loop, uv in zip(obj.data.uv_layers.active.data, [(0,0),(1,0),(1,1),(0,1)]): loop.uv = uv
+            corners = [(0, 0), (1, 0), (1, 1), (0, 1)]
+            for loop, uv in zip(obj.data.uv_layers.active.data, corners):
+                loop.uv = uv
             area.type = 'IMAGE_EDITOR'
             area.spaces.active.mode = 'UV'
             phase = 2
             return 2
         assert uv_renderer._shader is not None, 'UV shader was not drawn'
+        region = next(region for region in area.regions if region.type == 'WINDOW')
+        space = area.spaces.active
+        bpy.context.scene.cursor.location = (1000, 1000, 1000)
+        with bpy.context.temp_override(area=area, region=region, space_data=space):
+            result = bpy.ops.velend.cursor_from_uv(location=(.5, .5))
+        assert result == {'FINISHED'}, result
+        assert tuple(bpy.context.scene.cursor.location) != (1000, 1000, 1000)
+        bpy.context.scene.velend.uv_volume_rendering = False
+        assert not bpy.context.scene.velend.uv_volume_rendering
         print('VELEND UV GPU PASSED', flush=True)
         bpy.ops.wm.quit_blender()
     except Exception:

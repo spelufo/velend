@@ -1,4 +1,6 @@
-# v0.4.0 (main, unreleased)
+# v0.5.0 (main, unreleased)
+
+# v0.4.0
 
 - Volume sampling follows mesh normals, independent of which side is viewed.
 - Imported tifxyz surfaces have correctly oriented face normals and UV orientation.

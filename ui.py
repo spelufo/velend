@@ -170,6 +170,10 @@ def _debug_level_colors_updated(self, context):
 	VolumeSamplerRenderEngine.reload_shaders()
 
 
+def _uv_volume_rendering_updated(self, context):
+	VolumeSamplerRenderEngine.request_redraw()
+
+
 def _sampling_updated(self, context):
 	# The sample count controls a shader loop and the physical distances are
 	# converted to voxel-space constants when the shader is compiled.
@@ -584,6 +588,13 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		default=True,
 		options=set(),
 		update=_frustum_culling_updated,
+	)
+	uv_volume_rendering: bpy.props.BoolProperty(
+		name="Render Volume in UV Editor",
+		description="Draw the volume on the active mesh in UV Editors",
+		default=True,
+		options=set(),
+		update=_uv_volume_rendering_updated,
 	)
 	debug_level_colors: bpy.props.BoolProperty(
 		name="Level Colors",

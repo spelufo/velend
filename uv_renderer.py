@@ -6,6 +6,7 @@ import bpy
 import gpu
 import numpy as np
 from gpu_extras.batch import batch_for_shader
+from mathutils import Vector
 
 from . import bricks
 from .renderer import VolumeSamplerRenderEngine as Engine
@@ -16,6 +17,7 @@ _source_shader = None
 _batch = None
 _mesh_key = None
 _dirty = True
+_keymaps = []
 
 _VERTEX_SOURCE = """
 void main() {
@@ -28,6 +30,83 @@ void main() {
     gl_Position.z = 0.5 * gl_Position.w;
 }
 """
+
+
+def point_on_uv_mesh(obj, uv):
+	"""The world-space point under a UV coordinate, or None outside the mesh."""
+	arrays = mesh_arrays(obj)
+	if arrays is None:
+		return None
+	positions, _normals, uvs = arrays
+	for index in range(0, len(uvs), 3):
+		triangle = uvs[index:index + 3]
+		a, b, c = triangle
+		denominator = (b[1] - c[1]) * (a[0] - c[0]) + (
+			c[0] - b[0]) * (a[1] - c[1]
+		)
+		if abs(denominator) < 1e-12:
+			continue
+		wa = ((b[1] - c[1]) * (uv[0] - c[0]) +
+		(c[0] - b[0]) * (uv[1] - c[1])) / denominator
+		wb = ((c[1] - a[1]) * (uv[0] - c[0]) +
+		(a[0] - c[0]) * (uv[1] - c[1])) / denominator
+		wc = 1.0 - wa - wb
+		if min(wa, wb, wc) >= -1e-6:
+			local = (
+				wa * positions[index]
+				+ wb * positions[index + 1]
+				+ wc * positions[index + 2]
+			)
+			return obj.matrix_world @ Vector(local)
+	return None
+
+
+class velend_OT_cursor_from_uv(bpy.types.Operator):
+	bl_idname = "velend.cursor_from_uv"
+	bl_label = "Set 3D Cursor from UV"
+	bl_description = "Place the 3D cursor on the mesh below this UV coordinate"
+	bl_options = {'INTERNAL'}
+
+	location: bpy.props.FloatVectorProperty(size=2, options={'SKIP_SAVE', 'HIDDEN'})
+
+	@classmethod
+	def poll(cls, context):
+		space = context.space_data
+		obj = context.active_object
+		return (
+			space is not None and space.type == 'IMAGE_EDITOR' and space.mode == 'UV'
+			and obj is not None and obj.type == 'MESH'
+		)
+
+	def invoke(self, context, event):
+		self.location = context.region.view2d.region_to_view(
+			event.mouse_region_x, event.mouse_region_y
+		)
+		return self.execute(context)
+
+	def execute(self, context):
+		point = point_on_uv_mesh(context.active_object, self.location)
+		if point is None:
+			self.report({'WARNING'}, "No UV face under the cursor")
+			return {'CANCELLED'}
+		context.space_data.cursor_location = self.location
+		context.scene.cursor.location = point
+		Engine.retarget_now()
+		return {'FINISHED'}
+
+
+class IMAGE_PT_velend(bpy.types.Panel):
+	bl_label = "Velend"
+	bl_space_type = 'IMAGE_EDITOR'
+	bl_region_type = 'UI'
+	bl_category = "Velend"
+
+	@classmethod
+	def poll(cls, context):
+		return context.space_data.mode == 'UV'
+
+	def draw(self, context):
+		self.layout.prop(context.scene.velend, "uv_volume_rendering")
 
 
 def mesh_arrays(obj):
@@ -72,7 +151,8 @@ def _draw():
 	obj = context.active_object
 	if (space is None or space.type != 'IMAGE_EDITOR' or space.mode != 'UV'
 			or obj is None or obj.type != 'MESH' or not obj.data.uv_layers.active
-			or not context.scene.velend.volume_path.strip()):
+			or not context.scene.velend.volume_path.strip()
+			or not context.scene.velend.uv_volume_rendering):
 		return
 	if Engine.pending_reset:
 		Engine.apply_reset()
@@ -137,8 +217,17 @@ def _redraw():
 
 def register():
 	global _handler
+	bpy.utils.register_class(velend_OT_cursor_from_uv)
+	bpy.utils.register_class(IMAGE_PT_velend)
 	if _handler is None:
 		_handler = bpy.types.SpaceImageEditor.draw_handler_add(_draw, (), 'WINDOW', 'POST_VIEW')
+	keyconfig = bpy.context.window_manager.keyconfigs.addon
+	if keyconfig is not None:
+		keymap = keyconfig.keymaps.new(name='UV Editor', space_type='EMPTY')
+		item = keymap.keymap_items.new(
+			velend_OT_cursor_from_uv.bl_idname, 'RIGHTMOUSE', 'PRESS', shift=True
+		)
+		_keymaps.append((keymap, item))
 	for handlers in (bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.load_post):
 		if _invalidate not in handlers:
 			handlers.append(_invalidate)
@@ -147,6 +236,9 @@ def register():
 
 def unregister():
 	global _handler, _shader, _source_shader, _batch, _mesh_key
+	for keymap, item in _keymaps:
+		keymap.keymap_items.remove(item)
+	_keymaps.clear()
 	for handlers in (bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.load_post):
 		if _invalidate in handlers:
 			handlers.remove(_invalidate)
@@ -155,3 +247,5 @@ def unregister():
 		_handler = None
 	_batch = _shader = _source_shader = _mesh_key = None
 	_redraw()
+	bpy.utils.unregister_class(IMAGE_PT_velend)
+	bpy.utils.unregister_class(velend_OT_cursor_from_uv)
