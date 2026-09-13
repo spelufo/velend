@@ -1,4 +1,4 @@
-# v0.3.0
+# v0.4.0 (main, unreleased)
 
 - Volume sampling follows mesh normals, independent of which side is viewed.
 - Imported tifxyz surfaces have correctly oriented face normals and UV orientation.
@@ -7,7 +7,6 @@
 - File > Export > Volume Cartographer Surface writes rectangular UV quad grids,
   metadata, and FLOAT point-attribute channels back to tifxyz. It crops to the
   remaining UV bounds and writes holes from deleted geometry into `mask.tif`.
-
 - Volume switching. Point the panel at another volume of the same sample and it
   renders that one through the transform the open data metadata registers for
   the pair, so cutting planes and imported segments keep showing the same place
@@ -19,6 +18,17 @@
 - Voxel Size states the volume being rendered rather than the scene's own frame,
   and is shown rather than set: read off the metadata or the volume's directory
   name, and asked for when neither states it.
+
+
+# v0.3.0
+
+- Volume switching. Point the panel at another volume of the same sample and it
+  renders that one through the transform the open data metadata registers for
+  the pair, so cutting planes and imported segments keep showing the same place
+  in the scroll. A volume the metadata cannot relate to the scene's becomes the
+  scene's own frame instead, and the panel says so. Preferences > Add-ons >
+  velend > Extra Metadata supplies a transform the published metadata does not
+  have yet.
 - Frustum culling. Only the bricks inside a viewport's view frustum are
   streamed, so the resolution the streamer can afford goes to what is on
   screen. "Frustum Culling", in the panel, turns it off.
