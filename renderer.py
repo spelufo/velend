@@ -464,6 +464,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		"""Share volume sampling between the 3D and UV projections."""
 		vert_out = gpu.types.GPUStageInterfaceInfo("volume_interface")
 		vert_out.smooth('VEC3', "voxelCoord")
+		vert_out.smooth('VEC3', "voxelNormal")
 
 		shader_info = gpu.types.GPUShaderCreateInfo()
 		# The brick geometry never changes at runtime, so it costs nothing to
@@ -531,8 +532,9 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 				level * 2 + 1, 'FLOAT_3D', "l%dPageTable" % level
 			)
 		shader_info.vertex_in(0, 'VEC3', "position")
+		shader_info.vertex_in(1, 'VEC3', "normal")
 		if uv:
-			shader_info.vertex_in(1, 'VEC2', "uv")
+			shader_info.vertex_in(2, 'VEC2', "uv")
 		shader_info.vertex_out(vert_out)
 		shader_info.fragment_out(0, 'VEC4', "FragColor")
 		shader_info.vertex_source(vert_source)
@@ -577,10 +579,12 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			# `foreach_get` copies whole attributes at once, and buffers supporting the Python
 			# buffer protocol are uploaded to the vertex buffer without a per element conversion.
 			positions = np.empty((len(mesh.vertices), 3), 'f')
+			normals = np.empty_like(positions)
 			indices = np.empty((len(mesh.loop_triangles), 3), 'i')
 			mesh.vertices.foreach_get("co", np.reshape(positions, len(mesh.vertices) * 3))
+			mesh.vertices.foreach_get("normal", np.reshape(normals, len(mesh.vertices) * 3))
 			mesh.loop_triangles.foreach_get("vertices", np.reshape(indices, len(mesh.loop_triangles) * 3))
-			arrays = (positions, indices)
+			arrays = (positions, normals, indices)
 		obj_eval.to_mesh_clear()
 		cls.meshes[name] = arrays
 		return arrays
@@ -606,8 +610,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		arrays = cls.mesh_arrays(obj_eval)
 		if arrays is None:
 			return None
-		positions, indices = arrays
-		return batch_for_shader(cls.shader, 'TRIS', {"position": positions}, indices=indices)
+		positions, normals, indices = arrays
+		return batch_for_shader(
+			cls.shader, 'TRIS', {"position": positions, "normal": normals}, indices=indices
+		)
 
 	@classmethod
 	def retarget(cls, depsgraph, focus):
@@ -655,7 +661,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			arrays = cls.mesh_arrays(obj)
 			if arrays is None:
 				continue
-			positions, indices = arrays
+			positions, _normals, indices = arrays
 			matrix = np.asarray(instance.matrix_world, dtype=np.float64)
 			world = positions @ matrix[:3, :3].T + matrix[:3, 3]
 			# The chunks a triangle covers are the ones it covers in the loaded

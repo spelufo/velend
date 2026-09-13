@@ -20,7 +20,9 @@ _dirty = True
 _VERTEX_SOURCE = """
 void main() {
     vec4 world = volumeUniforms.modelMatrix * vec4(position, 1.0);
+    mat3 localToVoxels = mat3(volumeUniforms.worldToVoxels * volumeUniforms.modelMatrix);
     voxelCoord = (volumeUniforms.worldToVoxels * vec4(world.xyz, 1.0)).xyz;
+    voxelNormal = normalize(transpose(inverse(localToVoxels)) * normal);
     gl_Position = volumeUniforms.viewProjectionMatrix * vec4(uv, 0.0, 1.0);
     // Behind UV edges/vertices, in front of the image.
     gl_Position.z = 0.5 * gl_Position.w;
@@ -40,6 +42,7 @@ def mesh_arrays(obj):
 			return None
 		return (
 			np.asarray([loop.vert.co[:] for tri in triangles for loop in tri], dtype='f'),
+			np.asarray([loop.vert.normal[:] for tri in triangles for loop in tri], dtype='f'),
 			np.asarray([loop[layer].uv[:] for tri in triangles for loop in tri], dtype='f'),
 		)
 	mesh = obj.data
@@ -50,14 +53,16 @@ def mesh_arrays(obj):
 	if not mesh.loop_triangles:
 		return None
 	positions = np.empty((len(mesh.vertices), 3), dtype='f')
+	normals = np.empty_like(positions)
 	uvs = np.empty((len(mesh.loops), 2), dtype='f')
 	vertices = np.empty((len(mesh.loop_triangles), 3), dtype='i')
 	loops = np.empty_like(vertices)
 	mesh.vertices.foreach_get('co', positions.ravel())
+	mesh.vertices.foreach_get('normal', normals.ravel())
 	layer.data.foreach_get('uv', uvs.ravel())
 	mesh.loop_triangles.foreach_get('vertices', vertices.ravel())
 	mesh.loop_triangles.foreach_get('loops', loops.ravel())
-	return positions[vertices.ravel()], uvs[loops.ravel()]
+	return positions[vertices.ravel()], normals[vertices.ravel()], uvs[loops.ravel()]
 
 
 def _draw():
@@ -89,7 +94,7 @@ def _draw():
 	if _dirty or key != _mesh_key:
 		arrays = mesh_arrays(obj)
 		_batch = None if arrays is None else batch_for_shader(
-			_shader, 'TRIS', {'position': arrays[0], 'uv': arrays[1]},
+			_shader, 'TRIS', {'position': arrays[0], 'normal': arrays[1], 'uv': arrays[2]},
 		)
 		_mesh_key = key
 		_dirty = False

@@ -44,13 +44,17 @@ tmp = tempfile.TemporaryDirectory()
 root = Path(tmp.name) / 'volume-1000000um.zarr'
 group = zarr.open_group(root, mode='w', zarr_format=2)
 group.attrs['multiscales'] = [{'datasets': [{'path': str(i)} for i in range(6)]}]
-# A ramp along x, bright enough everywhere that no fragment is discarded.
-ramp = (51 + 3 * np.arange(SIZE)).astype('u1')
+# A ramp along x and z, bright enough everywhere that no fragment is discarded.
+x_ramp = np.arange(SIZE, dtype='u1')
+z_ramp = 2 * np.arange(SIZE, dtype='u1')[:, None, None]
 for i in range(6):
     array = group.create_array(str(i), shape=(SIZE,) * 3, chunks=(32, 32, 32), dtype='u1')
-    array[:] = np.broadcast_to(ramp, (SIZE, SIZE, SIZE))
+    array[:] = np.broadcast_to(51 + x_ramp + z_ramp, (SIZE, SIZE, SIZE))
 bpy.context.scene.unit_settings.scale_length = 1.0
 bpy.context.scene.velend.resolution = VOXEL_SIZE_UM
+bpy.context.scene.velend.num_samples = 2
+bpy.context.scene.velend.render_depth = 8 * VOXEL_SIZE_UM
+bpy.context.scene.velend.volumetric_rendering = False
 bpy.context.scene.velend.volume_path = str(root)
 E.get_volume()
 
@@ -62,13 +66,25 @@ VIEW_PROJECTION = (
     @ Matrix.Diagonal((2.0, 2.0, 1.0, 1.0))
     @ MODEL.inverted()
 )
+# Mirroring the projected X axis presents the other winding to the rasterizer,
+# as viewing the quad from its back would. A derivative normal changes sign;
+# the mesh normal must not.
+BACK_VIEW_PROJECTION = (
+    Matrix.Translation((1.0, -1.0, 0.0))
+    @ Matrix.Diagonal((-2.0, 2.0, 1.0, 1.0))
+    @ MODEL.inverted()
+)
 CORNERS = [(0., 0., 0.), (1., 0., 0.), (1., 1., 0.), (0., 1., 0.)]
+NORMALS = [(0., 0., 1.)] * 4
 
 
-def draw(offscreen, transform):
+def draw(offscreen, transform, view_projection=VIEW_PROJECTION):
     """The shader's output over the quad, as a (height, width) array."""
     E.world_to_voxels = transform
-    batch = batch_for_shader(E.shader, 'TRIS', {"position": CORNERS}, indices=[(0, 1, 2), (0, 2, 3)])
+    batch = batch_for_shader(
+        E.shader, 'TRIS', {"position": CORNERS, "normal": NORMALS},
+        indices=[(0, 1, 2), (0, 2, 3)],
+    )
     with offscreen.bind():
         framebuffer = gpu.state.active_framebuffer_get()
         framebuffer.clear(color=(0.0, 0.0, 0.0, 1.0))
@@ -76,7 +92,7 @@ def draw(offscreen, transform):
         for level in bricks.LEVELS:
             E.shader.uniform_sampler("l%dAtlas" % level, E.atlases[level].texture)
             E.shader.uniform_sampler("l%dPageTable" % level, E.atlases[level].page_texture)
-        E.update_uniform_buffer(VIEW_PROJECTION, MODEL)
+        E.update_uniform_buffer(view_projection, MODEL)
         E.shader.uniform_block("volumeUniforms", E.uniform_buffer)
         batch.draw(E.shader)
         pixels = np.asarray(framebuffer.read_color(0, 0, WIDTH, HEIGHT, 4, 0, 'FLOAT').to_list())
@@ -88,8 +104,11 @@ def expected(column):
     voxel = SPAN * (column + 0.5) / WIDTH
     lo = int(voxel)
     fraction = voxel - lo
-    value = ramp[lo] * (1.0 - fraction) + ramp[min(lo + 1, SIZE - 1)] * fraction
-    return (value / 255.0) ** 2
+    x_value = lo * (1.0 - fraction) + min(lo + 1, SIZE - 1) * fraction
+    first = 51.0 + x_value + 2.0 * DEPTH
+    second = 51.0 + x_value + 2.0 * (DEPTH - 4.0)
+    value = (first + 0.25 * second) / 1.25
+    return (value / 255.0) ** (1.0 / 0.45)
 
 
 started = time.monotonic()
@@ -116,6 +135,7 @@ def tick():
             plain = draw(offscreen, np.eye(4))
             shifted = draw(offscreen, np.array([
                 [1., 0., 0., SHIFT], [0., 1., 0., 0.], [0., 0., 1., 0.], [0., 0., 0., 1.]]))
+            back = draw(offscreen, np.eye(4), BACK_VIEW_PROJECTION)
         finally:
             offscreen.free()
 
@@ -129,7 +149,9 @@ def tick():
         offset = int(round(SHIFT_PIXELS))
         difference = np.abs(shifted[:, :overlap] - plain[:, offset:offset + overlap]).max()
         assert difference < 0.02, difference
-        assert shifted[:, :overlap].min() > plain[:, :overlap].min(), 'the ramp did not move'
+        assert shifted[:, :overlap].mean() > plain[:, :overlap].mean(), 'the ramp did not move'
+        # The same mesh side is sampled even when the rasterized winding is reversed.
+        assert np.abs(back[:, ::-1] - plain).max() < 0.01
         print('VELEND TRANSFORM GPU PASSED', flush=True)
         bpy.ops.wm.quit_blender()
     except Exception:

@@ -1,5 +1,6 @@
 # v0.3.0
 
+- Volume sampling follows mesh normals, independent of which side is viewed.
 - Imported tifxyz surfaces have correctly oriented face normals and UV orientation.
 - Tifxyz masks determine which vertices and faces are imported; they are not
   retained as mesh attributes. Delete mesh vertices or faces to edit validity.

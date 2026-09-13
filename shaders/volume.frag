@@ -123,10 +123,10 @@ void main() {
   float gamma = 0.45;
   const float threshold = 0.3;
 
-  // The face normal, in the same level 0 voxel space the samples are taken in.
-  // Derivatives of the interpolated coordinate give it per triangle, which is
-  // what we want here: only `position` reaches the shader as an attribute.
-  vec3 normal = normalize(cross(dFdx(voxelCoord), dFdy(voxelCoord)));
+  // The mesh normal is transformed into the level 0 voxel space the samples
+  // are taken in. Unlike a normal reconstructed from screen derivatives, its
+  // direction does not change when the viewer crosses the surface.
+  vec3 normal = normalize(voxelNormal);
 #if INVERT_SAMPLING_DIRECTION
   normal = -normal;
 #endif
