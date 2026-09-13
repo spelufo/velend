@@ -91,8 +91,18 @@ class QuadTest(unittest.TestCase):
 		used, quads = tifxyz.build_quads(valid)
 		self.assertEqual(used.sum(), 9)
 		self.assertEqual(len(quads), 4)
-		# Wound around the grid cell, so the faces all face the same way.
-		self.assertEqual(quads[0].tolist(), [0, 1, 4, 3])
+		# Tifxyz front-facing winding, with V following its rows.
+		self.assertEqual(quads[0].tolist(), [0, 3, 4, 1])
+
+	def test_faces_point_opposite_the_grid_coordinate_cross_product(self):
+		x, y, z = grid(2, 2)
+		positions, quads, _, _ = tifxyz.surface_arrays(
+			x, y, z, np.ones((2, 2), dtype=bool), {}
+		)
+		quad = quads[0]
+		normal = np.cross(positions[quad[1]] - positions[quad[0]],
+			positions[quad[2]] - positions[quad[0]])
+		self.assertLess(normal[2], 0.0)
 
 	def test_an_invalid_point_drops_the_quads_that_need_it(self):
 		valid = np.ones((3, 3), dtype=bool)
@@ -136,9 +146,9 @@ class SurfaceArraysTest(unittest.TestCase):
 		self.assertEqual(positions[0].tolist(), [100.0, 200.0, 300.0])
 		self.assertEqual(positions[-1].tolist(), [103.0, 202.0, 300.0])
 		self.assertEqual(values["generations"].tolist(), list(range(12)))
-		# U runs along the columns, V up the rows.
-		self.assertEqual(uvs[0].tolist(), [0.0, 1.0])
-		self.assertEqual(uvs[-1].tolist(), [1.0, 0.0])
+		# U runs opposite the columns and V runs along the tifxyz rows.
+		self.assertEqual(uvs[0].tolist(), [1.0, 0.0])
+		self.assertEqual(uvs[-1].tolist(), [0.0, 1.0])
 
 
 def write_surface(directory, x, y, z, mask=None, channels=None, meta=None):
@@ -246,13 +256,13 @@ class VillaFixtureTest(unittest.TestCase):
 
 
 class UVGridTest(unittest.TestCase):
-	def test_orders_a_grid_by_u_and_descending_v(self):
+	def test_orders_a_grid_by_descending_u_and_ascending_v(self):
 		uvs = np.array([
 			[1, 0], [0, 1], [1, 1], [0, 0], [0.5, 1], [0.5, 0],
 		], dtype=float)
 		faces = [(1, 4, 5, 3), (4, 2, 0, 5)]
 		grid_indices = tifxyz.grid_from_uvs(uvs, faces)
-		self.assertEqual(grid_indices.tolist(), [[1, 4, 2], [3, 5, 0]])
+		self.assertEqual(grid_indices.tolist(), [[0, 5, 3], [2, 4, 1]])
 
 	def test_rejects_a_missing_quad(self):
 		uvs = np.array([[0, 1], [1, 1], [0, 0], [1, 0]], dtype=float)
@@ -262,7 +272,7 @@ class UVGridTest(unittest.TestCase):
 	def test_crops_to_the_remaining_uv_bounds(self):
 		uvs = np.array([[0.2, 0.8], [0.5, 0.8], [0.2, 0.4], [0.5, 0.4]])
 		partial = tifxyz.partial_grid_from_uvs(uvs, [(0, 1, 3, 2)])
-		self.assertEqual(partial.tolist(), [[0, 1], [2, 3]])
+		self.assertEqual(partial.tolist(), [[3, 2], [1, 0]])
 
 	def test_keeps_holes_inside_the_uv_crop(self):
 		uvs = np.array([
@@ -273,7 +283,7 @@ class UVGridTest(unittest.TestCase):
 			uvs, [(0, 1, 5, 4), (2, 3, 7, 6)]
 		)
 		self.assertEqual(partial.tolist(), [
-			[0, 1, -1, 2, 3], [4, 5, -1, 6, 7],
+			[7, 6, -1, 5, 4], [3, 2, -1, 1, 0],
 		])
 
 	def test_ignores_orphan_vertices_without_uv_loops(self):
@@ -281,7 +291,7 @@ class UVGridTest(unittest.TestCase):
 			[0, 1], [0.5, 1], [0, 0], [0.5, 0], [np.nan, np.nan],
 		])
 		partial = tifxyz.partial_grid_from_uvs(uvs, [(0, 1, 3, 2)])
-		self.assertEqual(partial.tolist(), [[0, 1], [2, 3]])
+		self.assertEqual(partial.tolist(), [[3, 2], [1, 0]])
 
 	def test_missing_grid_values_get_the_invalid_point_sentinel(self):
 		grid_indices = np.array([[0, 1, -1], [2, 3, -1]])

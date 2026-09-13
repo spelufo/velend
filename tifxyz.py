@@ -179,10 +179,11 @@ def build_quads(valid):
 	indices = np.cumsum(used.ravel(), dtype=np.int32).reshape(valid.shape) - 1
 	rows, cols = np.nonzero(quad_valid)
 	quads = np.empty((len(rows), 4), dtype=np.int32)
+	# Walk the left edge first to use tifxyz front-facing winding.
 	quads[:, 0] = indices[rows, cols]
-	quads[:, 1] = indices[rows, cols + 1]
+	quads[:, 1] = indices[rows + 1, cols]
 	quads[:, 2] = indices[rows + 1, cols + 1]
-	quads[:, 3] = indices[rows + 1, cols]
+	quads[:, 3] = indices[rows, cols + 1]
 	return used, quads
 
 
@@ -219,9 +220,8 @@ def surface_arrays(x, y, z, valid, channels):
 	rows, cols = np.nonzero(used)
 	height, width = valid.shape
 	uvs = np.empty((len(rows), 2), dtype=np.float32)
-	uvs[:, 0] = cols / max(width - 1, 1)
-	# Row 0 is the top of the grid, and V runs up the image in Blender.
-	uvs[:, 1] = 1.0 - rows / max(height - 1, 1)
+	uvs[:, 0] = 1.0 - cols / max(width - 1, 1)
+	uvs[:, 1] = rows / max(height - 1, 1)
 	values = {name: channel[used] for name, channel in channels.items()}
 	return positions, quads, uvs, values
 
@@ -273,12 +273,12 @@ def grid_from_uvs(vertex_uvs, faces, tolerance=1e-5):
 	uvs = np.asarray(vertex_uvs, dtype=np.float64)
 	if uvs.ndim != 2 or uvs.shape[1] != 2 or len(uvs) < 4:
 		raise ValueError("the active UV map does not define a grid")
-	u_levels, cols = _levels(uvs[:, 0], tolerance)
-	v_levels, bottom_rows = _levels(uvs[:, 1], tolerance)
+	u_levels, right_cols = _levels(uvs[:, 0], tolerance)
+	v_levels, rows = _levels(uvs[:, 1], tolerance)
 	height, width = len(v_levels), len(u_levels)
 	if height < 2 or width < 2 or height * width != len(uvs):
 		raise ValueError("UV vertices do not form a complete rectangular lattice")
-	rows = height - 1 - bottom_rows
+	cols = width - 1 - right_cols
 	grid = np.full((height, width), -1, dtype=np.int32)
 	for vertex, (row, col) in enumerate(zip(rows, cols)):
 		if grid[row, col] != -1:
@@ -349,8 +349,8 @@ def partial_grid_from_uvs(vertex_uvs, faces, tolerance=1e-5):
 		raise ValueError("the inferred UV grid is too small")
 
 	vertices = np.flatnonzero(mapped)
-	cols_float = (uvs[vertices, 0] - u_min) / u_step
-	rows_float = (v_max - uvs[vertices, 1]) / v_step
+	cols_float = (u_max - uvs[vertices, 0]) / u_step
+	rows_float = (uvs[vertices, 1] - v_min) / v_step
 	cols = np.rint(cols_float).astype(np.int32)
 	rows = np.rint(rows_float).astype(np.int32)
 	# Blender stores UVs as float32. Allow their error to grow slightly when

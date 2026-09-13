@@ -1,5 +1,6 @@
 # v0.3.0
 
+- Imported tifxyz surfaces have correctly oriented face normals and UV orientation.
 - Tifxyz masks determine which vertices and faces are imported; they are not
   retained as mesh attributes. Delete mesh vertices or faces to edit validity.
 - File > Export > Volume Cartographer Surface writes rectangular UV quad grids,
