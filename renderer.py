@@ -481,7 +481,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		shader_info.define(
 			"SAMPLE_OFFSET", repr(settings.render_depth_offset / resolution)
 		)
-		shader_info.define("SKIP_VOID", "1" if settings.skip_void else "0")
+		shader_info.define(
+			"VOLUMETRIC_RENDERING",
+			"1" if settings.volumetric_rendering else "0",
+		)
 		shader_info.define(
 			"INVERT_SAMPLING_DIRECTION",
 			"1" if settings.invert_sampling_direction else "0",
@@ -491,6 +494,9 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		# the setting calls to make that happen.
 		shader_info.define(
 			"DEBUG_LEVEL_COLORS", "1" if settings.debug_level_colors else "0"
+		)
+		shader_info.define(
+			"DEPTH_COLORS", "1" if settings.depth_colors else "0"
 		)
 		for level in bricks.LEVELS:
 			shader_info.define("L%d_ACTIVE" % level, "1")

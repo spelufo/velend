@@ -120,7 +120,7 @@ vec3 levelColor(int level) {
 }
 
 void main() {
-  float gamma = 0.5;
+  float gamma = 0.45;
   const float threshold = 0.3;
 
   // The face normal, in the same level 0 voxel space the samples are taken in.
@@ -133,29 +133,38 @@ void main() {
 
   float startDepth = SAMPLE_OFFSET;
   float firstSample = sampleVolume(voxelCoord - normal * startDepth);
-#if SKIP_VOID
-  // Search at most half the averaging depth for the first non-void sample.
-  bool found = firstSample > threshold;
-  for (int i = 1; i < max(NORMAL_SAMPLES / 2, 1) && !found; i++) {
-    startDepth = SAMPLE_OFFSET + float(i) * SAMPLE_DELTA;
-    firstSample = sampleVolume(voxelCoord - normal * startDepth);
-    found = firstSample > threshold;
-  }
-  if (!found) {
-    startDepth = SAMPLE_OFFSET + float(max(NORMAL_SAMPLES / 2, 1)) * SAMPLE_DELTA;
-    firstSample = sampleVolume(voxelCoord - normal * startDepth);
-  }
-#endif
 
   float raw = firstSample;
   float totalWeight = 1.0f;
+#if VOLUMETRIC_RENDERING
+  // March from the surface inward. A bright sample leaves less of the ray for
+  // everything behind it, while empty space is transparent. Keeping the final
+  // division makes this an absorption-weighted average on the same intensity
+  // scale as ordinary rendering.
+  float tfactor = .5;
+  float transmittance = 1.0f - tfactor * clamp(firstSample, 0.0f, 1.0f);
+#endif
+#if DEPTH_COLORS
+  float depthMass = max(firstSample, 0.0f);
+  float weightedSampleIndex = 0.0f;
+#endif
 #if DEBUG_LEVEL_COLORS
   int finestLevel = sampledLevel;
 #endif
   for (int i = 1; i < NORMAL_SAMPLES; i++) {
     float depth = startDepth + float(i) * SAMPLE_DELTA;
     float weight = 1.0f - 0.75f * float(i) / float(max(NORMAL_SAMPLES - 1, 1));
-    raw += weight * sampleVolume(voxelCoord - normal * depth);
+    float sampleValue = sampleVolume(voxelCoord - normal * depth);
+#if VOLUMETRIC_RENDERING
+    weight *= transmittance;
+    transmittance *= 1.0f - tfactor * clamp(sampleValue, 0.0f, 1.0f);
+#endif
+    raw += weight * sampleValue;
+#if DEPTH_COLORS
+    float contribution = weight * max(sampleValue, 0.0f);
+    depthMass += contribution;
+    weightedSampleIndex += float(i) * contribution;
+#endif
     totalWeight += weight;
 #if DEBUG_LEVEL_COLORS
     // The samples straddle a chunk boundary near the edges of a brick, so they
@@ -179,6 +188,18 @@ void main() {
   if (raw < 0.001) {
     discard;
   }
+
+#if DEPTH_COLORS
+  if (depthMass > 0.0f) {
+    float relativeDepth = clamp(
+      weightedSampleIndex / depthMass / float(max(NORMAL_SAMPLES - 1, 1)), 0.0f, 1.0f);
+    float intensity = pow(raw, 1/gamma);
+    vec3 depthColor = mix(vec3(1.0f, 1.0f, 0.0f), vec3(1.0f, 0.0f, 0.0f), relativeDepth);
+    FragColor = vec4(depthColor * intensity, 1.0f);
+    return;
+  }
+#endif
+
   // Masking.
   // if (raw < threshold) {
   //   raw = 0.0;

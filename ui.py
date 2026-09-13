@@ -595,6 +595,16 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		options=set(),
 		update=_debug_level_colors_updated,
 	)
+	depth_colors: bpy.props.BoolProperty(
+		name="Depth Colors",
+		description=(
+			"Tint samples near the viewer yellow and samples deeper into the "
+			"surface red"
+		),
+		default=False,
+		options=set(),
+		update=_debug_level_colors_updated,
+	)
 	render_depth: bpy.props.FloatProperty(
 		name="Render Depth",
 		description="Total inward sampling depth, in micrometers",
@@ -623,10 +633,10 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		step=1000,
 		update=_sampling_updated,
 	)
-	skip_void: bpy.props.BoolProperty(
-		name="Skip Void",
+	volumetric_rendering: bpy.props.BoolProperty(
+		name="Volumetric Rendering",
 		description=(
-			"Search up to half the render depth for material before averaging samples"
+			"Let high-intensity samples absorb the ray and obscure samples behind them"
 		),
 		default=True,
 		options=set(),
@@ -746,7 +756,7 @@ class RENDER_PT_velend_sampling(bpy.types.Panel):
 		column.prop(settings, "render_depth")
 		column.prop(settings, "num_samples")
 		column.prop(settings, "render_depth_offset")
-		column.prop(settings, "skip_void")
+		column.prop(settings, "volumetric_rendering")
 		column.prop(settings, "invert_sampling_direction")
 		column.label(
 			text="Sample Distance: %g um" % (
@@ -756,6 +766,7 @@ class RENDER_PT_velend_sampling(bpy.types.Panel):
 		column.separator()
 		column.prop(settings, "frustum_culling")
 		column.prop(settings, "debug_level_colors")
+		column.prop(settings, "depth_colors")
 
 
 @bpy.app.handlers.persistent

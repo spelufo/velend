@@ -73,6 +73,9 @@ Hit "z" and choose "Rendered" to show the scroll scan on the cutting planes.
 - `alt + rmb` -> pan
 - `scroll wheel` -> zoom
 
+- Disable the sculpt mode shortcuts that interfere with above:
+  - Set pivot position
+  - alt+lmb
 
 ## Development
 
