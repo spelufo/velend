@@ -16,6 +16,8 @@ the file reading needs tifffile. `commands.velend_OT_import_tifxyz` turns what
 
 import json
 import os
+import shutil
+import tempfile
 
 import numpy as np
 
@@ -211,7 +213,7 @@ class Surface:
 
 
 def surface_arrays(x, y, z, valid, channels):
-	"""The vertex arrays of a grid: positions, quads, UVs and channel values."""
+	"""Build mesh arrays for the valid part of a coordinate grid."""
 	used, quads = build_quads(valid)
 	positions = np.stack((x[used], y[used], z[used]), axis=1).astype(np.float32)
 	rows, cols = np.nonzero(used)
@@ -224,7 +226,7 @@ def surface_arrays(x, y, z, valid, channels):
 	return positions, quads, uvs, values
 
 
-def read_surface(directory, step=1, load_mask=True, load_channels=True):
+def read_surface(directory, step=1, load_channels=True):
 	"""Read a tifxyz surface directory into the arrays a mesh is built from.
 
 	`step` keeps every nth row and column of the grid, which is how a segment
@@ -234,10 +236,9 @@ def read_surface(directory, step=1, load_mask=True, load_channels=True):
 	meta = read_meta(directory)
 	x, y, z = read_coordinates(directory)
 	valid = valid_points(x, y, z)
-	if load_mask:
-		mask = read_mask(directory, valid.shape)
-		if mask is not None:
-			valid = valid & mask
+	loaded_mask = read_mask(directory, valid.shape)
+	if loaded_mask is not None:
+		valid &= loaded_mask
 	channels = {}
 	if load_channels:
 		for name in channel_names(directory):
@@ -249,4 +250,219 @@ def read_surface(directory, step=1, load_mask=True, load_channels=True):
 		x, y, z, valid = x[sample], y[sample], z[sample], valid[sample]
 		channels = {name: channel[sample] for name, channel in channels.items()}
 	positions, quads, uvs, values = surface_arrays(x, y, z, valid, channels)
-	return Surface(directory, meta, valid.shape, positions, quads, uvs, values)
+	return Surface(
+		directory, meta, valid.shape, positions, quads, uvs, values
+	)
+
+
+def _levels(values, tolerance=1e-5):
+	"""Cluster nearly equal UV coordinates and return levels and indices."""
+	order = np.argsort(values)
+	levels = []
+	indices = np.empty(len(values), dtype=np.int32)
+	for vertex in order:
+		value = float(values[vertex])
+		if not levels or abs(value - levels[-1]) > tolerance:
+			levels.append(value)
+		indices[vertex] = len(levels) - 1
+	return np.asarray(levels), indices
+
+
+def grid_from_uvs(vertex_uvs, faces, tolerance=1e-5):
+	"""Return row-major indices for a complete rectangular UV quad grid."""
+	uvs = np.asarray(vertex_uvs, dtype=np.float64)
+	if uvs.ndim != 2 or uvs.shape[1] != 2 or len(uvs) < 4:
+		raise ValueError("the active UV map does not define a grid")
+	u_levels, cols = _levels(uvs[:, 0], tolerance)
+	v_levels, bottom_rows = _levels(uvs[:, 1], tolerance)
+	height, width = len(v_levels), len(u_levels)
+	if height < 2 or width < 2 or height * width != len(uvs):
+		raise ValueError("UV vertices do not form a complete rectangular lattice")
+	rows = height - 1 - bottom_rows
+	grid = np.full((height, width), -1, dtype=np.int32)
+	for vertex, (row, col) in enumerate(zip(rows, cols)):
+		if grid[row, col] != -1:
+			raise ValueError("more than one vertex occupies a UV grid point")
+		grid[row, col] = vertex
+	if (grid < 0).any():
+		raise ValueError("the UV grid has missing vertices")
+
+	actual = set()
+	for face in faces:
+		if len(face) != 4:
+			raise ValueError("the mesh contains a non-quad face")
+		cells = {(int(rows[v]), int(cols[v])) for v in face}
+		face_rows = {cell[0] for cell in cells}
+		face_cols = {cell[1] for cell in cells}
+		if len(cells) != 4 or len(face_rows) != 2 or len(face_cols) != 2:
+			raise ValueError("a face does not follow the UV grid")
+		r0, r1 = min(face_rows), max(face_rows)
+		c0, c1 = min(face_cols), max(face_cols)
+		if r1 != r0 + 1 or c1 != c0 + 1:
+			raise ValueError("a face skips a row or column in the UV grid")
+		actual.add((r0, c0))
+	expected = {(row, col) for row in range(height - 1) for col in range(width - 1)}
+	if actual != expected or len(faces) != len(expected):
+		raise ValueError("the mesh is not a complete rectangular quad grid")
+	return grid
+
+
+def partial_grid_from_uvs(vertex_uvs, faces, tolerance=1e-5):
+	"""Map surviving face vertices to their smallest rectangular UV crop.
+
+	Vertices without face loops have no UV in Blender and are ignored. Holes
+	inside the crop remain -1, so callers can export them as masked samples.
+	"""
+	uvs = np.asarray(vertex_uvs, dtype=np.float64)
+	if uvs.ndim != 2 or uvs.shape[1] != 2:
+		raise ValueError("the active UV map does not define a grid")
+	mapped = np.isfinite(uvs).all(axis=1)
+	if mapped.sum() < 4:
+		raise ValueError("too few vertices remain in the active UV map")
+
+	u_steps = []
+	v_steps = []
+	for original_face in faces:
+		face = tuple(original_face)
+		if len(face) != 4:
+			raise ValueError("the mesh contains a non-quad face")
+		if any(vertex < 0 or vertex >= len(uvs) or not mapped[vertex] for vertex in face):
+			raise ValueError("a face has a vertex without an active UV coordinate")
+		for first, second in zip(face, face[1:] + face[:1]):
+			delta = np.abs(uvs[first] - uvs[second])
+			if delta[0] > tolerance and delta[1] <= tolerance:
+				u_steps.append(float(delta[0]))
+			elif delta[1] > tolerance and delta[0] <= tolerance:
+				v_steps.append(float(delta[1]))
+			else:
+				raise ValueError("a face edge does not follow the UV grid")
+	if not u_steps or not v_steps:
+		raise ValueError("the remaining faces do not establish a rectangular UV spacing")
+
+	u_step = min(u_steps)
+	v_step = min(v_steps)
+	u_min, v_min = uvs[mapped].min(axis=0)
+	u_max, v_max = uvs[mapped].max(axis=0)
+	width = int(round((u_max - u_min) / u_step)) + 1
+	height = int(round((v_max - v_min) / v_step)) + 1
+	if width < 2 or height < 2:
+		raise ValueError("the inferred UV grid is too small")
+
+	vertices = np.flatnonzero(mapped)
+	cols_float = (uvs[vertices, 0] - u_min) / u_step
+	rows_float = (v_max - uvs[vertices, 1]) / v_step
+	cols = np.rint(cols_float).astype(np.int32)
+	rows = np.rint(rows_float).astype(np.int32)
+	# Blender stores UVs as float32. Allow their error to grow slightly when
+	# converted into grid-index units, but stay well below half a cell.
+	index_tolerance = 0.1
+	if (
+		(np.abs(cols_float - cols) > index_tolerance).any()
+		or (np.abs(rows_float - rows) > index_tolerance).any()
+		or (cols < 0).any() or (cols >= width).any()
+		or (rows < 0).any() or (rows >= height).any()
+	):
+		raise ValueError("UV vertices do not lie on the inferred tifxyz grid")
+
+	vertex_cells = {
+		int(vertex): (int(row), int(col))
+		for vertex, row, col in zip(vertices, rows, cols)
+	}
+	grid = np.full((height, width), -1, dtype=np.int32)
+	for vertex, (row, col) in vertex_cells.items():
+		if grid[row, col] != -1:
+			raise ValueError("more than one vertex occupies an inferred grid point")
+		grid[row, col] = vertex
+
+	seen = set()
+	for original_face in faces:
+		face = tuple(original_face)
+		cells = {vertex_cells[vertex] for vertex in face}
+		face_rows = {cell[0] for cell in cells}
+		face_cols = {cell[1] for cell in cells}
+		if len(cells) != 4 or len(face_rows) != 2 or len(face_cols) != 2:
+			raise ValueError("a face does not follow the inferred UV grid")
+		r0, r1 = min(face_rows), max(face_rows)
+		c0, c1 = min(face_cols), max(face_cols)
+		if r1 != r0 + 1 or c1 != c0 + 1 or (r0, c0) in seen:
+			raise ValueError("the mesh has invalid or duplicate grid faces")
+		seen.add((r0, c0))
+	return grid
+
+
+def scatter_grid(values, grid, fill):
+	"""Place existing vertex values in a full grid and fill missing samples."""
+	values = np.asarray(values)
+	grid = np.asarray(grid)
+	result = np.empty(grid.shape + values.shape[1:], dtype=values.dtype)
+	result[...] = fill
+	rows, cols = np.nonzero(grid >= 0)
+	result[rows, cols] = values[grid[rows, cols]]
+	return result
+
+
+def surface_meta(meta, uuid, scale, points, mask):
+	"""Return Villa-compatible metadata updated for exported arrays."""
+	result = dict(meta or {})
+	result.update({
+		"format": "tifxyz", "type": "seg", "uuid": str(uuid),
+		"scale": [float(scale[0]), float(scale[1])],
+		"tiff_dimensions": [int(points.shape[1]), int(points.shape[0])],
+	})
+	valid = points[np.asarray(mask) >= 0.5]
+	result["bbox"] = (
+		[valid.min(axis=0).tolist(), valid.max(axis=0).tolist()]
+		if len(valid) else [[-1.0] * 3, [-1.0] * 3]
+	)
+	return result
+
+
+def write_surface(directory, points, mask, channels, meta, uuid, scale):
+	"""Atomically publish a rectangular grid as a tifxyz directory."""
+	import tifffile
+
+	points = np.asarray(points, dtype=np.float32)
+	if points.ndim != 3 or points.shape[2] != 3:
+		raise ValueError("points must be a height by width by 3 array")
+	mask = np.asarray(mask, dtype=np.float32)
+	if mask.shape != points.shape[:2]:
+		raise ValueError("mask does not match the coordinate grid")
+	for name, values in channels.items():
+		if np.asarray(values).shape != mask.shape:
+			raise ValueError("channel %s does not match the coordinate grid" % name)
+
+	directory = os.path.abspath(directory)
+	parent = os.path.dirname(directory)
+	os.makedirs(parent, exist_ok=True)
+	staging = tempfile.mkdtemp(prefix=".velend-tifxyz-", dir=parent)
+	try:
+		for index, name in enumerate(("x", "y", "z")):
+			tifffile.imwrite(os.path.join(staging, name + ".tif"), points[..., index])
+		binary_mask = np.where(mask >= 0.5, MASK_KEEP, 0).astype(np.uint8)
+		mask_path = os.path.join(staging, "mask.tif")
+		try:
+			tifffile.imwrite(
+				mask_path, binary_mask, compression="lzw", tile=(1024, 1024)
+			)
+		except Exception:
+			# Villa accepts an ordinary uint8 TIFF too. This also keeps export
+			# usable on platforms whose imagecodecs wheel lacks LZW encoding.
+			tifffile.imwrite(mask_path, binary_mask, compression=None)
+		for name, values in channels.items():
+			tifffile.imwrite(
+				os.path.join(staging, name + ".tif"),
+				np.asarray(values, dtype=np.float32),
+			)
+		with open(os.path.join(staging, "meta.json"), "w") as file:
+			json.dump(surface_meta(meta, uuid, scale, points, mask), file, indent=2)
+			file.write("\n")
+
+		os.makedirs(directory, exist_ok=True)
+		new_names = set(os.listdir(staging))
+		for name in os.listdir(directory):
+			if name.endswith(".tif") and name not in new_names:
+				os.remove(os.path.join(directory, name))
+		for name in new_names:
+			os.replace(os.path.join(staging, name), os.path.join(directory, name))
+	finally:
+		shutil.rmtree(staging, ignore_errors=True)

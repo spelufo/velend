@@ -12,7 +12,11 @@ Downloads into VC3D's cache stay within the budget its settings put on it, under
 
 File > Import > Volume Cartographer Surface (tifxyz) brings a segmentation in as a mesh. Point it at a surface directory, the one holding `x.tif`, `y.tif`, `z.tif` and `meta.json`, or at a folder of them such as VC3D's `patches/`, and every surface under it comes in at once.
 
-The surface's grid becomes a quad per cell, minus the cells its `mask.tif` takes out, with a UV map over the grid and any extra channel like `generations.tif` as a mesh attribute. Raise "Step" to bring a large segment in coarser, one grid point in every n. "Voxel Size" says what the surface's coordinates are in, and starts from the voxel size of the volume being rendered, that being the likeliest one they were traced against, so a segment lands inside the volume it came from and "Load High-Res Volume" renders the scan on it.
+The surface's coordinate grid becomes a quad mesh with a UV map. Its `mask.tif` decides which grid vertices and faces are created; it is not retained as a mesh attribute. To change the mask, delete vertices or faces from the mesh.
+
+File > Export > Volume Cartographer Surface exports a quad mesh whose surviving face vertices lie on a rectangular UV lattice. It crops to their smallest UV rectangle, writes holes inside it with mask 0 and invalid coordinates, and ignores orphan vertices that have no UV face corners. Object transforms are included. Apply or remove modifiers before exporting. Imported metadata and placement are reused, while a new mesh starts with editable UUID, grid scale, and voxel-size defaults. Public FLOAT point attributes become extra TIFF channels.
+
+Raise "Step" to bring a large segment in coarser, one grid point in every n. "Voxel Size" says what the surface's coordinates are in, and starts from the voxel size of the volume being rendered, that being the likeliest one they were traced against, so a segment lands inside the volume it came from and "Load High-Res Volume" renders the scan on it.
 
 
 ## Umbilici

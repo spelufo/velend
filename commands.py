@@ -1,3 +1,4 @@
+import json
 import math
 import os
 
@@ -397,11 +398,15 @@ def _placement(context, voxel_size):
 	"""
 	matrix = VolumeSamplerRenderEngine.compute_world_from_voxels()
 	scale = voxel_size / (context.scene.velend.resolution or voxel_size)
+	placement = np.array(matrix, dtype=np.float64)
+	placement[:3, :3] *= scale
 
 	def place(points):
-		voxels = points * scale
-		return (voxels @ matrix[:3, :3].T + matrix[:3, 3]).astype(np.float32)
+		return (
+			points @ placement[:3, :3].T + placement[:3, 3]
+		).astype(np.float32)
 
+	place.matrix = placement
 	return place
 
 
@@ -444,6 +449,8 @@ def _link_surface(context, surface, place, step, voxel_size):
 	obj["velend_tifxyz_scale"] = list(surface.scale)
 	obj["velend_tifxyz_step"] = step
 	obj["velend_tifxyz_voxel_size"] = voxel_size
+	obj["velend_tifxyz_meta"] = json.dumps(surface.meta)
+	obj["velend_tifxyz_placement"] = place.matrix.ravel().tolist()
 	context.scene.collection.objects.link(obj)
 	obj.select_set(True)
 	context.view_layer.objects.active = obj
@@ -487,11 +494,6 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 		min=1e-6,
 		soft_max=100.0,
 		precision=3,
-	)
-	load_mask: bpy.props.BoolProperty(
-		name="Apply Mask",
-		description="Drop the grid points mask.tif takes out of the surface",
-		default=True,
 	)
 	load_channels: bpy.props.BoolProperty(
 		name="Extra Channels",
@@ -539,7 +541,6 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 				surface = tifxyz.read_surface(
 					path,
 					step=self.step,
-					load_mask=self.load_mask,
 					load_channels=self.load_channels,
 				)
 			except Exception as error:
@@ -563,6 +564,184 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 				"Imported %d surface%s, %d vertices and %d faces"
 				% (len(paths), "" if len(paths) == 1 else "s", vertices, faces),
 			)
+		return {'FINISHED'}
+
+
+
+def _attribute_values(attribute, count):
+	values = np.empty(count, dtype=np.float32)
+	attribute.data.foreach_get("value", values)
+	return values
+
+
+def _mesh_uvs_faces(mesh, require_all=True):
+	"""Return one consistent active-UV coordinate per vertex and every face."""
+	layer = mesh.uv_layers.active
+	if layer is None:
+		raise ValueError("the mesh has no active UV map")
+	vertex_uvs = np.full((len(mesh.vertices), 2), np.nan, dtype=np.float64)
+	for loop in mesh.loops:
+		uv = np.asarray(layer.data[loop.index].uv, dtype=np.float64)
+		old = vertex_uvs[loop.vertex_index]
+		if np.isfinite(old).all() and not np.allclose(old, uv, atol=1e-5, rtol=0):
+			raise ValueError("a vertex has different UVs on different faces")
+		vertex_uvs[loop.vertex_index] = uv
+	if require_all and not np.isfinite(vertex_uvs).all():
+		raise ValueError("some vertices are not used by the active UV map")
+	return vertex_uvs, [tuple(polygon.vertices) for polygon in mesh.polygons]
+
+
+def _mesh_grid(mesh):
+	"""The mesh's rectangular row-major vertex index grid."""
+	vertex_uvs, faces = _mesh_uvs_faces(mesh)
+	return tifxyz.grid_from_uvs(vertex_uvs, faces)
+
+
+def _mesh_export_arrays(mesh, obj, grid):
+	positions = np.empty((len(mesh.vertices), 3), dtype=np.float64)
+	mesh.vertices.foreach_get("co", positions.ravel())
+	world = np.asarray(obj.matrix_world, dtype=np.float64)
+	positions = positions @ world[:3, :3].T + world[:3, 3]
+	mask = np.ones(len(mesh.vertices), dtype=np.float32)
+	channels = {}
+	for attribute in mesh.attributes:
+		if (
+			attribute.name not in {"mask", "x", "y", "z"}
+			and not attribute.name.startswith(".")
+			and attribute.domain == 'POINT'
+			and attribute.data_type == 'FLOAT'
+		):
+			channels[attribute.name] = _attribute_values(attribute, len(mesh.vertices))[grid]
+	return positions[grid], mask[grid], channels
+
+
+def _completed_mesh_arrays(mesh, obj):
+	"""Complete the smallest UV crop, masking lattice points absent from the mesh."""
+	vertex_uvs, faces = _mesh_uvs_faces(mesh, require_all=False)
+	present = tifxyz.partial_grid_from_uvs(vertex_uvs, faces)
+	current = np.empty((len(mesh.vertices), 3), dtype=np.float64)
+	mesh.vertices.foreach_get("co", current.ravel())
+	world = np.asarray(obj.matrix_world, dtype=np.float64)
+	current = current @ world[:3, :3].T + world[:3, 3]
+	points = tifxyz.scatter_grid(current, present, (-1.0, -1.0, -1.0))
+
+	values = np.ones(len(mesh.vertices), dtype=np.float32)
+	mask = tifxyz.scatter_grid(values, present, 0.0)
+
+	channels = {}
+	for attribute in mesh.attributes:
+		if (
+			attribute.name not in {"mask", "x", "y", "z"}
+			and not attribute.name.startswith(".")
+			and attribute.domain == 'POINT'
+			and attribute.data_type == 'FLOAT'
+		):
+			values = _attribute_values(attribute, len(mesh.vertices))
+			channels[attribute.name] = tifxyz.scatter_grid(values, present, 0.0)
+	return points, mask, channels
+
+
+class velend_OT_export_tifxyz(bpy.types.Operator):
+	bl_idname = "velend.export_tifxyz"
+	bl_label = "Export tifxyz Surface"
+	bl_description = "Export the active UV quad grid, cropping and masking deleted vertices"
+	bl_options = {'REGISTER'}
+
+	filepath: bpy.props.StringProperty(subtype='DIR_PATH', options={'SKIP_SAVE'})
+	uuid: bpy.props.StringProperty(name="UUID")
+	scale_x: bpy.props.FloatProperty(name="Grid Scale X", default=1.0, min=1e-9)
+	scale_y: bpy.props.FloatProperty(name="Grid Scale Y", default=1.0, min=1e-9)
+	voxel_size: bpy.props.FloatProperty(name="Voxel Size", default=9.362, min=1e-9)
+	overwrite: bpy.props.BoolProperty(
+		name="Replace Existing tifxyz Files",
+		description="Replace metadata and TIFF channels already in the chosen directory",
+		default=False,
+	)
+
+	@classmethod
+	def poll(cls, context):
+		return context.active_object is not None and context.active_object.type == 'MESH'
+
+	def draw(self, context):
+		layout = self.layout
+		layout.prop(self, "uuid")
+		row = layout.row(align=True)
+		row.prop(self, "scale_x")
+		row.prop(self, "scale_y")
+		layout.prop(self, "voxel_size")
+		layout.prop(self, "overwrite")
+
+	def _defaults(self, context):
+		obj = context.active_object
+		self.uuid = str(obj.get("velend_tifxyz_uuid", obj.name))
+		step = max(1, int(obj.get("velend_tifxyz_step", 1)))
+		scale = obj.get("velend_tifxyz_scale", (1.0, 1.0))
+		self.scale_x = float(scale[0]) / step
+		self.scale_y = float(scale[1]) / step
+		self.voxel_size = float(
+			obj.get("velend_tifxyz_voxel_size", context.scene.velend.resolution)
+		)
+		source = obj.get("velend_tifxyz_path")
+		self.filepath = str(source or os.path.join(os.getcwd(), self.uuid))
+
+	def invoke(self, context, event):
+		self._defaults(context)
+		if context.active_object.modifiers:
+			self.report({'ERROR'}, "Apply or remove modifiers before exporting tifxyz")
+			return {'CANCELLED'}
+		context.window_manager.fileselect_add(self)
+		return {'RUNNING_MODAL'}
+
+	def execute(self, context):
+		obj = context.active_object
+		if obj.modifiers:
+			self.report({'ERROR'}, "Apply or remove modifiers before exporting tifxyz")
+			return {'CANCELLED'}
+		directory = os.path.expanduser(bpy.path.abspath(self.filepath.strip()))
+		if not directory:
+			self.report({'ERROR'}, "No export directory selected")
+			return {'CANCELLED'}
+		existing = os.path.isdir(directory) and any(
+			name == "meta.json" or name.endswith(".tif")
+			for name in os.listdir(directory)
+		)
+		if existing and not self.overwrite:
+			self.report({'ERROR'}, "Target contains tifxyz files; enable replacement to export")
+			return {'CANCELLED'}
+
+		mesh = obj.data
+		try:
+			missing = None
+			stored = obj.get("velend_tifxyz_placement")
+			placement = (
+				np.asarray(stored, dtype=np.float64).reshape(4, 4)
+				if stored is not None else _placement(context, self.voxel_size).matrix
+			)
+			try:
+				grid = _mesh_grid(mesh)
+				points, mask, channels = _mesh_export_arrays(mesh, obj, grid)
+			except ValueError:
+				points, mask, channels = _completed_mesh_arrays(mesh, obj)
+				missing = mask < 0.5
+				grid = np.empty(points.shape[:2], dtype=np.int32)
+			inverse = np.linalg.inv(placement)
+			points = points @ inverse[:3, :3].T + inverse[:3, 3]
+			if missing is not None:
+				points[missing] = -1.0
+			try:
+				meta = json.loads(obj.get("velend_tifxyz_meta", "{}"))
+			except (TypeError, ValueError):
+				meta = {}
+			tifxyz.write_surface(
+				directory, points, mask, channels, meta, self.uuid,
+				(self.scale_x, self.scale_y),
+			)
+		except Exception as error:
+			self.report({'ERROR'}, "Could not export tifxyz: %s" % error)
+			return {'CANCELLED'}
+		self.report(
+			{'INFO'}, "Exported %d x %d tifxyz surface" % (grid.shape[1], grid.shape[0])
+		)
 		return {'FINISHED'}
 
 
@@ -656,6 +835,13 @@ def _view_menu(self, context):
 	self.layout.operator(velend_OT_load_hires.bl_idname)
 
 
+def _export_menu(self, context):
+	self.layout.operator(
+		velend_OT_export_tifxyz.bl_idname,
+		text="Volume Cartographer Surface (tifxyz)",
+	)
+
+
 def _import_menu(self, context):
 	self.layout.operator(
 		velend_OT_import_tifxyz.bl_idname,
@@ -674,15 +860,19 @@ def register():
 	bpy.utils.register_class(velend_OT_set_volpkg_volume)
 	bpy.utils.register_class(velend_OT_setup_scene)
 	bpy.utils.register_class(velend_OT_import_tifxyz)
+	bpy.utils.register_class(velend_OT_export_tifxyz)
 	bpy.utils.register_class(velend_OT_import_umbilicus)
 	bpy.types.VIEW3D_MT_view.append(_view_menu)
 	bpy.types.TOPBAR_MT_file_import.append(_import_menu)
+	bpy.types.TOPBAR_MT_file_export.append(_export_menu)
 
 
 def unregister():
+	bpy.types.TOPBAR_MT_file_export.remove(_export_menu)
 	bpy.types.TOPBAR_MT_file_import.remove(_import_menu)
 	bpy.types.VIEW3D_MT_view.remove(_view_menu)
 	bpy.utils.unregister_class(velend_OT_import_umbilicus)
+	bpy.utils.unregister_class(velend_OT_export_tifxyz)
 	bpy.utils.unregister_class(velend_OT_import_tifxyz)
 	bpy.utils.unregister_class(velend_OT_setup_scene)
 	bpy.utils.unregister_class(velend_OT_set_volpkg_volume)

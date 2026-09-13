@@ -147,11 +147,13 @@ def write_surface(directory, x, y, z, mask=None, channels=None, meta=None):
 	for name, band in (("x", x), ("y", y), ("z", z)):
 		tifffile.imwrite(directory / (name + ".tif"), band, compression=None)
 	if mask is not None:
-		# VC writes the mask tiled and LZW compressed, unlike the coordinates,
-		# so this covers the tiled and the compressed paths too.
-		tifffile.imwrite(
-			directory / "mask.tif", mask, compression="lzw", tile=(16, 16)
-		)
+		# Exercise Villa's tiled LZW form when the local codec supports writing it.
+		try:
+			tifffile.imwrite(
+				directory / "mask.tif", mask, compression="lzw", tile=(16, 16)
+			)
+		except Exception:
+			tifffile.imwrite(directory / "mask.tif", mask, compression=None)
 	for name, values in (channels or {}).items():
 		tifffile.imwrite(directory / (name + ".tif"), values)
 	full = {"format": "tifxyz", "type": "seg", "uuid": "test", "scale": [0.05, 0.05]}
@@ -186,14 +188,14 @@ class ReadSurfaceTest(unittest.TestCase):
 			channels={"generations": generations},
 		)
 		surface = tifxyz.read_surface(path)
-		# The one masked out corner takes its quad, and only that quad, away.
 		self.assertEqual(len(surface.quads), 8)
+		self.assertEqual(len(surface.positions), 15)
 		self.assertEqual(sorted(surface.channels), ["generations"])
 		self.assertEqual(len(surface.channels["generations"]), len(surface.positions))
 
-		ignored = tifxyz.read_surface(path, load_mask=False, load_channels=False)
-		self.assertEqual(len(ignored.quads), 9)
-		self.assertEqual(ignored.channels, {})
+		without_channels = tifxyz.read_surface(path, load_channels=False)
+		self.assertEqual(len(without_channels.quads), 8)
+		self.assertEqual(without_channels.channels, {})
 
 	def test_step_subsamples_the_grid_without_moving_it(self):
 		x, y, z = grid(5, 5)
@@ -241,6 +243,94 @@ class VillaFixtureTest(unittest.TestCase):
 		low, high = surface.meta["bbox"]
 		self.assertTrue((surface.positions >= np.array(low) - 1e-3).all())
 		self.assertTrue((surface.positions <= np.array(high) + 1e-3).all())
+
+
+class UVGridTest(unittest.TestCase):
+	def test_orders_a_grid_by_u_and_descending_v(self):
+		uvs = np.array([
+			[1, 0], [0, 1], [1, 1], [0, 0], [0.5, 1], [0.5, 0],
+		], dtype=float)
+		faces = [(1, 4, 5, 3), (4, 2, 0, 5)]
+		grid_indices = tifxyz.grid_from_uvs(uvs, faces)
+		self.assertEqual(grid_indices.tolist(), [[1, 4, 2], [3, 5, 0]])
+
+	def test_rejects_a_missing_quad(self):
+		uvs = np.array([[0, 1], [1, 1], [0, 0], [1, 0]], dtype=float)
+		with self.assertRaisesRegex(ValueError, "complete rectangular"):
+			tifxyz.grid_from_uvs(uvs, [])
+
+	def test_crops_to_the_remaining_uv_bounds(self):
+		uvs = np.array([[0.2, 0.8], [0.5, 0.8], [0.2, 0.4], [0.5, 0.4]])
+		partial = tifxyz.partial_grid_from_uvs(uvs, [(0, 1, 3, 2)])
+		self.assertEqual(partial.tolist(), [[0, 1], [2, 3]])
+
+	def test_keeps_holes_inside_the_uv_crop(self):
+		uvs = np.array([
+			[0, 1], [0.25, 1], [0.75, 1], [1, 1],
+			[0, 0], [0.25, 0], [0.75, 0], [1, 0],
+		])
+		partial = tifxyz.partial_grid_from_uvs(
+			uvs, [(0, 1, 5, 4), (2, 3, 7, 6)]
+		)
+		self.assertEqual(partial.tolist(), [
+			[0, 1, -1, 2, 3], [4, 5, -1, 6, 7],
+		])
+
+	def test_ignores_orphan_vertices_without_uv_loops(self):
+		uvs = np.array([
+			[0, 1], [0.5, 1], [0, 0], [0.5, 0], [np.nan, np.nan],
+		])
+		partial = tifxyz.partial_grid_from_uvs(uvs, [(0, 1, 3, 2)])
+		self.assertEqual(partial.tolist(), [[0, 1], [2, 3]])
+
+	def test_missing_grid_values_get_the_invalid_point_sentinel(self):
+		grid_indices = np.array([[0, 1, -1], [2, 3, -1]])
+		points = np.arange(12, dtype=float).reshape(4, 3)
+		completed = tifxyz.scatter_grid(points, grid_indices, (-1, -1, -1))
+		self.assertEqual(completed[0, 2].tolist(), [-1.0, -1.0, -1.0])
+		self.assertEqual(completed[1, 1].tolist(), points[3].tolist())
+
+
+@unittest.skipIf(tifffile is None, "tifffile and imagecodecs are not installed")
+class WriteSurfaceTest(unittest.TestCase):
+	def setUp(self):
+		self.root = Path(tempfile.mkdtemp())
+		self.addCleanup(shutil.rmtree, self.root)
+
+	def test_invalid_completed_samples_do_not_reimport_as_geometry(self):
+		x, y, z = grid(2, 3)
+		points = np.stack((x, y, z), axis=2)
+		points[:, 2] = -1.0
+		mask = np.ones((2, 3), dtype=np.float32)
+		mask[:, 2] = 0.0
+		tifxyz.write_surface(
+			self.root / "completed", points, mask, {}, {}, "completed", (1, 1)
+		)
+		surface = tifxyz.read_surface(self.root / "completed")
+		self.assertEqual(len(surface.positions), 4)
+		self.assertEqual(len(surface.quads), 1)
+
+	def test_writes_villa_mask_channels_and_metadata(self):
+		x, y, z = grid(2, 3)
+		points = np.stack((x, y, z), axis=2)
+		mask = np.array([[1.0, 0.7, 0.49], [0.0, 1.0, 1.0]], dtype=np.float32)
+		tifxyz.write_surface(
+			self.root / "out", points, mask,
+			{"score": np.arange(6, dtype=np.float32).reshape(2, 3)},
+			{"note": "kept"}, "exported", (0.1, 0.2),
+		)
+		self.assertEqual(
+			tifxyz.read_page(self.root / "out" / "mask.tif").tolist(),
+			[[255, 255, 0], [0, 255, 255]],
+		)
+		meta = json.loads((self.root / "out" / "meta.json").read_text())
+		self.assertEqual(meta["uuid"], "exported")
+		self.assertEqual(meta["scale"], [0.1, 0.2])
+		self.assertEqual(meta["tiff_dimensions"], [3, 2])
+		self.assertEqual(meta["note"], "kept")
+		self.assertEqual(
+			tifxyz.read_page(self.root / "out" / "score.tif").shape, (2, 3)
+		)
 
 
 if __name__ == "__main__":

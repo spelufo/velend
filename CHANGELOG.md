@@ -1,5 +1,11 @@
 # v0.3.0
 
+- Tifxyz masks determine which vertices and faces are imported; they are not
+  retained as mesh attributes. Delete mesh vertices or faces to edit validity.
+- File > Export > Volume Cartographer Surface writes rectangular UV quad grids,
+  metadata, and FLOAT point-attribute channels back to tifxyz. It crops to the
+  remaining UV bounds and writes holes from deleted geometry into `mask.tif`.
+
 - Volume switching. Point the panel at another volume of the same sample and it
   renders that one through the transform the open data metadata registers for
   the pair, so cutting planes and imported segments keep showing the same place
