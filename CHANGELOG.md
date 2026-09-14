@@ -1,5 +1,11 @@
 # v0.5.0 (main, unreleased)
 
+- Shift-right-click in the UV Editor now moves the 3D cursor and retargets
+  high-resolution volume loading in Object Mode as well as Edit Mode.
+- Imported tifxyz surfaces carry a lightweight aspect image so Blender's UV
+  Editor displays their rectangular grids without stretching them square.
+- Set Up tifxyz UV Aspect applies that display fix to surfaces imported earlier.
+
 # v0.4.0
 
 - Volume sampling follows mesh normals, independent of which side is viewed.

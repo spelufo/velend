@@ -223,7 +223,9 @@ def register():
 		_handler = bpy.types.SpaceImageEditor.draw_handler_add(_draw, (), 'WINDOW', 'POST_VIEW')
 	keyconfig = bpy.context.window_manager.keyconfigs.addon
 	if keyconfig is not None:
-		keymap = keyconfig.keymaps.new(name='UV Editor', space_type='EMPTY')
+		# Blender's UV Editor keymap is disabled outside Edit Mode. Image Generic
+		# still has the operator poll below to keep this binding specific to UVs.
+		keymap = keyconfig.keymaps.new(name='Image Generic', space_type='IMAGE_EDITOR')
 		item = keymap.keymap_items.new(
 			velend_OT_cursor_from_uv.bl_idname, 'RIGHTMOUSE', 'PRESS', shift=True
 		)

@@ -28,6 +28,15 @@ COORDINATE_FILES = ("x.tif", "y.tif", "z.tif")
 REQUIRED_FILES = COORDINATE_FILES + ("meta.json",)
 RESERVED_FILES = frozenset(COORDINATE_FILES + ("mask.tif",))
 
+
+class UVGridError(ValueError):
+	"""A UV-grid validation error with optional offending mesh elements."""
+
+	def __init__(self, message, vertices=(), faces=()):
+		super().__init__(message)
+		self.vertices = tuple(vertices)
+		self.faces = tuple(faces)
+
 # A mask pixel keeps its grid point only when it is fully set. VC uses 255 for
 # every sample format, not the maximum of the type, so this is a plain number.
 MASK_KEEP = 255
@@ -322,12 +331,14 @@ def partial_grid_from_uvs(vertex_uvs, faces, tolerance=1e-5):
 
 	u_steps = []
 	v_steps = []
-	for original_face in faces:
+	for face_index, original_face in enumerate(faces):
 		face = tuple(original_face)
 		if len(face) != 4:
-			raise ValueError("the mesh contains a non-quad face")
+			raise UVGridError("the mesh contains a non-quad face", face, (face_index,))
 		if any(vertex < 0 or vertex >= len(uvs) or not mapped[vertex] for vertex in face):
-			raise ValueError("a face has a vertex without an active UV coordinate")
+			raise UVGridError(
+				"a face has a vertex without an active UV coordinate", face, (face_index,)
+			)
 		for first, second in zip(face, face[1:] + face[:1]):
 			delta = np.abs(uvs[first] - uvs[second])
 			if delta[0] > tolerance and delta[1] <= tolerance:
@@ -335,7 +346,9 @@ def partial_grid_from_uvs(vertex_uvs, faces, tolerance=1e-5):
 			elif delta[1] > tolerance and delta[0] <= tolerance:
 				v_steps.append(float(delta[1]))
 			else:
-				raise ValueError("a face edge does not follow the UV grid")
+				raise UVGridError(
+					"a face edge does not follow the UV grid", (first, second), (face_index,)
+				)
 	if not u_steps or not v_steps:
 		raise ValueError("the remaining faces do not establish a rectangular UV spacing")
 

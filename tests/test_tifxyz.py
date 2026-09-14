@@ -293,6 +293,13 @@ class UVGridTest(unittest.TestCase):
 		partial = tifxyz.partial_grid_from_uvs(uvs, [(0, 1, 3, 2)])
 		self.assertEqual(partial.tolist(), [[3, 2], [1, 0]])
 
+	def test_reports_the_face_and_edge_that_do_not_follow_the_grid(self):
+		uvs = np.array([[0, 0], [1, 0], [0.9, 1], [0, 1]], dtype=float)
+		with self.assertRaises(tifxyz.UVGridError) as raised:
+			tifxyz.partial_grid_from_uvs(uvs, [(0, 1, 2, 3)])
+		self.assertEqual(raised.exception.vertices, (1, 2))
+		self.assertEqual(raised.exception.faces, (0,))
+
 	def test_missing_grid_values_get_the_invalid_point_sentinel(self):
 		grid_indices = np.array([[0, 1, -1], [2, 3, -1]])
 		points = np.arange(12, dtype=float).reshape(4, 3)

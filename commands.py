@@ -2,6 +2,7 @@ import json
 import math
 import os
 
+import bmesh
 import bpy
 import numpy as np
 
@@ -438,16 +439,104 @@ def _surface_mesh(name, surface, place):
 	return mesh
 
 
+def _surface_uv_material(shape):
+	"""An image material that tells Blender the tifxyz UV display aspect."""
+	height, width = shape
+	grid_size = (max(width - 1, 1), max(height - 1, 1))
+	material = next((material for material in bpy.data.materials
+		if tuple(material.get("velend_tifxyz_grid_size", ())) == grid_size), None)
+	if material is not None:
+		return material
+	image = next((image for image in bpy.data.images
+		if tuple(image.get("velend_tifxyz_grid_size", ())) == grid_size), None)
+	if image is None:
+		image = bpy.data.images.new(
+			"tifxyz UV Aspect %d x %d" % (width, height), width=1, height=1, alpha=True
+		)
+		image.generated_color = (0.0, 0.0, 0.0, 0.0)
+		image.display_aspect = grid_size
+		image["velend_tifxyz_grid_size"] = grid_size
+
+	material = bpy.data.materials.new("tifxyz UV Aspect")
+	material["velend_tifxyz_grid_size"] = grid_size
+	material.use_nodes = True
+	node = material.node_tree.nodes.new('ShaderNodeTexImage')
+	node.name = "tifxyz UV Aspect"
+	node.image = image
+	material.node_tree.nodes.active = node
+	return material
+
+
+def _surface_shape_from_uvs(obj):
+	"""Infer the tifxyz export grid shape from a mesh's active UV map."""
+	if obj.mode == 'EDIT':
+		bm = bmesh.from_edit_mesh(obj.data)
+		layer = bm.loops.layers.uv.active
+		if layer is None:
+			raise ValueError("the mesh has no active UV map")
+		bm.verts.index_update()
+		vertex_uvs = np.full((len(bm.verts), 2), np.nan, dtype=np.float64)
+		faces = []
+		for face in bm.faces:
+			faces.append(tuple(loop.vert.index for loop in face.loops))
+			for loop in face.loops:
+				uv = np.asarray(loop[layer].uv, dtype=np.float64)
+				old = vertex_uvs[loop.vert.index]
+				if np.isfinite(old).all() and not np.allclose(old, uv, atol=1e-5, rtol=0):
+					raise ValueError("a vertex has different UVs on different faces")
+				vertex_uvs[loop.vert.index] = uv
+	else:
+		vertex_uvs, faces = _mesh_uvs_faces(obj.data, require_all=False)
+	return tifxyz.partial_grid_from_uvs(vertex_uvs, faces).shape
+
+
+class velend_OT_setup_tifxyz_uv_aspect(bpy.types.Operator):
+	bl_idname = "velend.setup_tifxyz_uv_aspect"
+	bl_label = "Set Up tifxyz UV Aspect"
+	bl_description = "Give selected imported tifxyz surfaces their correct UV Editor aspect ratio"
+	bl_options = {'REGISTER', 'UNDO'}
+
+	@classmethod
+	def poll(cls, context):
+		return any(obj.type == 'MESH' for obj in context.selected_objects)
+
+	def execute(self, context):
+		updated = 0
+		failures = []
+		for obj in context.selected_objects:
+			if obj.type != 'MESH':
+				continue
+			try:
+				material = _surface_uv_material(_surface_shape_from_uvs(obj))
+			except (TypeError, ValueError) as error:
+				if isinstance(error, tifxyz.UVGridError):
+					_select_uv_grid_error(context, obj, error)
+				failures.append("%s (%s)" % (obj.name, error))
+				continue
+			if all(slot.material != material for slot in obj.material_slots):
+				obj.data.materials.append(material)
+			updated += 1
+		if failures:
+			self.report({'WARNING'}, "Could not update: %s" % ", ".join(failures))
+		if not updated:
+			return {'CANCELLED'}
+		self.report({'INFO'}, "Set up UV aspect for %d tifxyz surface%s"
+			% (updated, "" if updated == 1 else "s"))
+		return {'FINISHED'}
+
+
 def _link_surface(context, surface, place, step, voxel_size):
 	"""Build the surface's object and put it in the scene, selected."""
 	name = surface.uuid
 	obj = bpy.data.objects.new(name, _surface_mesh(name, surface, place))
+	obj.data.materials.append(_surface_uv_material(surface.shape))
 	# Where it came from and what it was read with, so that a later reload or
 	# export does not have to be told again.
 	obj["velend_tifxyz_path"] = surface.path
 	obj["velend_tifxyz_uuid"] = surface.uuid
 	obj["velend_tifxyz_scale"] = list(surface.scale)
 	obj["velend_tifxyz_step"] = step
+	obj["velend_tifxyz_shape"] = surface.shape
 	obj["velend_tifxyz_voxel_size"] = voxel_size
 	obj["velend_tifxyz_meta"] = json.dumps(surface.meta)
 	obj["velend_tifxyz_placement"] = place.matrix.ravel().tolist()
@@ -589,6 +678,37 @@ def _mesh_uvs_faces(mesh, require_all=True):
 	if require_all and not np.isfinite(vertex_uvs).all():
 		raise ValueError("some vertices are not used by the active UV map")
 	return vertex_uvs, [tuple(polygon.vertices) for polygon in mesh.polygons]
+
+
+def _select_uv_grid_error(context, obj, error):
+	"""Select mesh elements attached to a reported UV-grid validation error."""
+	was_edit = obj.mode == 'EDIT'
+	context.view_layer.objects.active = obj
+	obj.select_set(True)
+	if was_edit and bpy.ops.object.mode_set.poll():
+		bpy.ops.object.mode_set(mode='OBJECT')
+	mesh = obj.data
+	for vertex in mesh.vertices:
+		vertex.select = False
+	for edge in mesh.edges:
+		edge.select = False
+	for polygon in mesh.polygons:
+		polygon.select = False
+	vertices = set(error.vertices)
+	for index in error.faces:
+		if 0 <= index < len(mesh.polygons):
+			polygon = mesh.polygons[index]
+			polygon.select = True
+			vertices.update(polygon.vertices)
+	for index in vertices:
+		if 0 <= index < len(mesh.vertices):
+			mesh.vertices[index].select = True
+	for edge in mesh.edges:
+		if edge.vertices[0] in vertices and edge.vertices[1] in vertices:
+			edge.select = True
+	mesh.update()
+	if was_edit and bpy.ops.object.mode_set.poll():
+		bpy.ops.object.mode_set(mode='EDIT')
 
 
 def _mesh_grid(mesh):
@@ -737,6 +857,8 @@ class velend_OT_export_tifxyz(bpy.types.Operator):
 				(self.scale_x, self.scale_y),
 			)
 		except Exception as error:
+			if isinstance(error, tifxyz.UVGridError):
+				_select_uv_grid_error(context, obj, error)
 			self.report({'ERROR'}, "Could not export tifxyz: %s" % error)
 			return {'CANCELLED'}
 		self.report(
@@ -835,6 +957,11 @@ def _view_menu(self, context):
 	self.layout.operator(velend_OT_load_hires.bl_idname)
 
 
+def _object_menu(self, context):
+	if any(obj.type == 'MESH' for obj in context.selected_objects):
+		self.layout.operator(velend_OT_setup_tifxyz_uv_aspect.bl_idname)
+
+
 def _export_menu(self, context):
 	self.layout.operator(
 		velend_OT_export_tifxyz.bl_idname,
@@ -860,9 +987,11 @@ def register():
 	bpy.utils.register_class(velend_OT_set_volpkg_volume)
 	bpy.utils.register_class(velend_OT_setup_scene)
 	bpy.utils.register_class(velend_OT_import_tifxyz)
+	bpy.utils.register_class(velend_OT_setup_tifxyz_uv_aspect)
 	bpy.utils.register_class(velend_OT_export_tifxyz)
 	bpy.utils.register_class(velend_OT_import_umbilicus)
 	bpy.types.VIEW3D_MT_view.append(_view_menu)
+	bpy.types.VIEW3D_MT_object.append(_object_menu)
 	bpy.types.TOPBAR_MT_file_import.append(_import_menu)
 	bpy.types.TOPBAR_MT_file_export.append(_export_menu)
 
@@ -870,9 +999,11 @@ def register():
 def unregister():
 	bpy.types.TOPBAR_MT_file_export.remove(_export_menu)
 	bpy.types.TOPBAR_MT_file_import.remove(_import_menu)
+	bpy.types.VIEW3D_MT_object.remove(_object_menu)
 	bpy.types.VIEW3D_MT_view.remove(_view_menu)
 	bpy.utils.unregister_class(velend_OT_import_umbilicus)
 	bpy.utils.unregister_class(velend_OT_export_tifxyz)
+	bpy.utils.unregister_class(velend_OT_setup_tifxyz_uv_aspect)
 	bpy.utils.unregister_class(velend_OT_import_tifxyz)
 	bpy.utils.unregister_class(velend_OT_setup_scene)
 	bpy.utils.unregister_class(velend_OT_set_volpkg_volume)

@@ -9,7 +9,7 @@ import os
 if os.environ.get('VELEND_TEST_DEPS'):
     sys.path.insert(0, os.environ['VELEND_TEST_DEPS'])
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-import bpy, tempfile, time, zarr, traceback
+import bmesh, bpy, tempfile, time, zarr, traceback
 from pathlib import Path
 import velend
 from velend.renderer import VolumeSamplerRenderEngine as E
@@ -31,6 +31,8 @@ E.get_volume()
 phase = 0
 started = time.monotonic()
 area = next(a for a in bpy.context.screen.areas if a.type == 'VIEW_3D')
+
+
 def tick():
     global phase, started
     try:
@@ -44,6 +46,7 @@ def tick():
             assert E.atlases and E.shader is not None, E.status()
             print('VELEND 3D GPU PASSED', flush=True)
             obj = bpy.data.objects['Cut Z']
+            bpy.ops.object.select_all(action='DESELECT')
             bpy.context.view_layer.objects.active = obj
             obj.select_set(True)
             obj.data.uv_layers.new(name='UVMap')
@@ -55,15 +58,37 @@ def tick():
             phase = 2
             return 2
         assert uv_renderer._shader is not None, 'UV shader was not drawn'
+        keymap = bpy.context.window_manager.keyconfigs.addon.keymaps['Image Generic']
+        assert any(item.idname == 'velend.cursor_from_uv' for item in keymap.keymap_items)
+        user_keymap = bpy.context.window_manager.keyconfigs.user.keymaps['Image Generic']
+        assert any(item.idname == 'velend.cursor_from_uv' for item in user_keymap.keymap_items)
         region = next(region for region in area.regions if region.type == 'WINDOW')
         space = area.spaces.active
-        bpy.context.scene.cursor.location = (1000, 1000, 1000)
         with bpy.context.temp_override(area=area, region=region, space_data=space):
+            assert bpy.context.active_object.mode == 'OBJECT'
+            bpy.context.scene.cursor.location = (1000, 1000, 1000)
             result = bpy.ops.velend.cursor_from_uv(location=(.5, .5))
-        assert result == {'FINISHED'}, result
-        assert tuple(bpy.context.scene.cursor.location) != (1000, 1000, 1000)
+            assert result == {'FINISHED'}, result
+            assert tuple(bpy.context.scene.cursor.location) != (1000, 1000, 1000)
+            bpy.ops.object.mode_set(mode='EDIT')
+            bpy.context.scene.cursor.location = (1000, 1000, 1000)
+            result = bpy.ops.velend.cursor_from_uv(location=(.5, .5))
+            assert result == {'FINISHED'}, result
+            assert tuple(bpy.context.scene.cursor.location) != (1000, 1000, 1000)
+            bm = bmesh.from_edit_mesh(bpy.context.active_object.data)
+            bm.loops.layers.uv.remove(bm.loops.layers.uv.active)
+            layer = bm.loops.layers.uv.new('UVMap')
+            for face in bm.faces:
+                for loop, uv in zip(face.loops, [(0, 0), (1, 0), (1, 1), (0, 1)]):
+                    loop[layer].uv = uv
+            bmesh.update_edit_mesh(bpy.context.active_object.data)
+            assert len(bpy.context.active_object.data.uv_layers.active.data) == 0
+            result = bpy.ops.velend.setup_tifxyz_uv_aspect()
+            assert result == {'FINISHED'}, result
         bpy.context.scene.velend.uv_volume_rendering = False
         assert not bpy.context.scene.velend.uv_volume_rendering
+        uv_renderer.unregister()
+        assert not any(item.idname == 'velend.cursor_from_uv' for item in keymap.keymap_items)
         print('VELEND UV GPU PASSED', flush=True)
         bpy.ops.wm.quit_blender()
     except Exception:
