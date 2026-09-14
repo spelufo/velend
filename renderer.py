@@ -292,27 +292,20 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	@classmethod
 	def reset(cls):
-		"""Ask for everything derived from the volume to be rebuilt."""
+		"""Drop CPU state now and ask the next draw to free GPU state.
+
+		A file can be opened and "Setup Scene for Volume" run before a rendered
+		viewport has drawn. Keeping the old grid until that draw would let the new
+		file inherit the previous file's volume dimensions.
+		"""
 		if cls.load_future is not None:
 			cls.load_future.cancel()
 		cls.load_future = None
 		cls.load_key = None
 		cls.pyramid = None
-		cls.pending_reset = True
-		# Cleared here rather than in the deferred teardown so that the panel
-		# stops reporting the previous volume's trouble straight away.
-		cls.failed_path = None
-		cls.volume_error = None
-		cls.request_redraw()
-
-	@classmethod
-	def apply_reset(cls):
-		"""Drop it all, so the rest of this draw rebuilds it. Needs a GPU context."""
-		cls.pending_reset = False
 		if cls.loader is not None:
 			cls.loader.shutdown()
 			cls.loader = None
-		cls.atlases = {}
 		cls.residencies = {}
 		cls.shapes_xyz = {}
 		cls.shape_xyz = None
@@ -325,6 +318,18 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.last_cursor = None
 		cls.last_view_key = None
 		cls.view_settled = False
+		cls.pending_reset = True
+		# Cleared here rather than in the deferred teardown so that the panel
+		# stops reporting the previous volume's trouble straight away.
+		cls.failed_path = None
+		cls.volume_error = None
+		cls.request_redraw()
+
+	@classmethod
+	def apply_reset(cls):
+		"""Drop resources whose destruction needs a GPU context."""
+		cls.pending_reset = False
+		cls.atlases = {}
 		# The page table dimensions are baked into the fragment shader, so a
 		# volume of a different size needs the shader compiled again.
 		cls.shader = None
@@ -985,6 +990,7 @@ def _load_post(_file_path):
 	# The engine's state is class level, so it outlives the file it was built
 	# for; the new file may well name a different volume.
 	VolumeSamplerRenderEngine.reset()
+	state.close_volume()
 
 
 def register():
