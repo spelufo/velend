@@ -5,6 +5,12 @@
 // Samples averaged inward from the face. The renderer defines their count,
 // spacing, and starting offset in level 0 voxels from physical scene settings.
 
+#if UV_EDITOR
+#define OUTPUT_ALPHA uvOpacity
+#else
+#define OUTPUT_ALPHA 1.0f
+#endif
+
 // One level's lookup: level 0 coordinate in, the atlas texel it lands on out.
 // `scale` takes the coordinate into this level's voxels, the page table says
 // which atlas slot its chunk lives in, and `BRICK_PAD` skips the halo of
@@ -181,7 +187,7 @@ void main() {
     discard;
   }
   // Keep enough of the intensity to read the surface through the tint.
-  FragColor = vec4(levelColor(finestLevel) * (0.01f + 0.65f * pow(raw, 2.0f)), 1.0f);
+  FragColor = vec4(levelColor(finestLevel) * (0.01f + 0.65f * pow(raw, 2.0f)), OUTPUT_ALPHA);
   return;
 #endif
 
@@ -195,7 +201,7 @@ void main() {
       weightedSampleIndex / depthMass / float(max(NORMAL_SAMPLES - 1, 1)), 0.0f, 1.0f);
     float intensity = pow(raw, 1/gamma);
     vec3 depthColor = mix(vec3(1.0f, 1.0f, 0.0f), vec3(1.0f, 0.0f, 0.0f), relativeDepth);
-    FragColor = vec4(depthColor * intensity, 1.0f);
+    FragColor = vec4(depthColor * intensity, OUTPUT_ALPHA);
     return;
   }
 #endif
@@ -209,5 +215,5 @@ void main() {
 
   float intensity = pow(raw, 1/gamma);
   // Viewport overlay composites as `render.rgb + background * (1 - render.a)`.
-  FragColor = vec4(vec3(intensity), 1.0);
+  FragColor = vec4(vec3(intensity), OUTPUT_ALPHA);
 }

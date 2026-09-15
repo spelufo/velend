@@ -596,6 +596,15 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		options=set(),
 		update=_uv_volume_rendering_updated,
 	)
+	uv_transparency: bpy.props.FloatProperty(
+		name="Transparency",
+		description="Transparency of the volume drawn in UV Editors",
+		default=0.0,
+		min=0.0,
+		max=1.0,
+		subtype='FACTOR',
+		update=_uv_volume_rendering_updated,
+	)
 	debug_level_colors: bpy.props.BoolProperty(
 		name="Level Colors",
 		description=(

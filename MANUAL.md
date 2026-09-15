@@ -26,7 +26,7 @@ File > Import > Umbilicus brings an `umbilicus.json`, or the `z, y, x` text form
 
 ## UV volume view
 
-The UV Editor renders the volume on the active mesh's active UV map, including live Edit Mode changes. Select an imported segment and open the UV Editor to see its flattened scan. Shift-right-click a UV face to put the 3D cursor at that point on the mesh and load high-resolution detail around it. The Velend tab in the UV Editor sidebar can turn the volume drawing off.
+The UV Editor renders the volume on the active mesh's active UV map, including live Edit Mode changes. Select an imported segment and open the UV Editor to see its flattened scan. Shift-right-click a UV face to put the 3D cursor at that point on the mesh and load high-resolution detail around it. The Velend tab in the UV Editor sidebar can turn the volume drawing off or adjust its transparency from 0 (opaque) to 1 (invisible).
 
 This currently uses the editable mesh, before modifiers. Overlapping UV faces overwrite one another. UV edges and vertices are depth-tested against the volume drawing; translucent face-selection and stretch overlays are not preserved by this drawing pass.
 

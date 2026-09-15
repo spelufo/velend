@@ -107,6 +107,7 @@ class IMAGE_PT_velend(bpy.types.Panel):
 
 	def draw(self, context):
 		self.layout.prop(context.scene.velend, "uv_volume_rendering")
+		self.layout.prop(context.scene.velend, "uv_transparency")
 
 
 def mesh_arrays(obj):
@@ -185,7 +186,7 @@ def _draw():
 	depth_test = gpu.state.depth_test_get()
 	depth_mask = gpu.state.depth_mask_get()
 	try:
-		gpu.state.blend_set('NONE')
+		gpu.state.blend_set('ALPHA')
 		gpu.state.depth_test_set('LESS_EQUAL')
 		gpu.state.depth_mask_set(False)
 		_shader.bind()
@@ -194,6 +195,7 @@ def _draw():
 			_shader.uniform_sampler('l%dPageTable' % level, Engine.atlases[level].page_texture)
 		Engine.update_uniform_buffer(gpu.matrix.get_projection_matrix(), obj.matrix_world)
 		_shader.uniform_block('volumeUniforms', Engine.uniform_buffer)
+		_shader.uniform_float('uvOpacity', 1.0 - context.scene.velend.uv_transparency)
 		_batch.draw(_shader)
 	finally:
 		gpu.state.depth_mask_set(depth_mask)

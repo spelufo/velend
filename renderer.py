@@ -529,6 +529,9 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			};
 		""")
 		shader_info.uniform_buf(0, "VolumeUniforms", "volumeUniforms")
+		if uv:
+			shader_info.define("UV_EDITOR", "1")
+			shader_info.push_constant('FLOAT', "uvOpacity")
 		for level in bricks.LEVELS:
 			shader_info.sampler(
 				level * 2, 'FLOAT_3D', "l%dAtlas" % level
