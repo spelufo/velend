@@ -126,7 +126,6 @@ vec3 levelColor(int level) {
 }
 
 void main() {
-  float gamma = 0.45;
   const float threshold = 0.3;
 
   // The mesh normal is transformed into the level 0 voxel space the samples
@@ -199,7 +198,7 @@ void main() {
   if (depthMass > 0.0f) {
     float relativeDepth = clamp(
       weightedSampleIndex / depthMass / float(max(NORMAL_SAMPLES - 1, 1)), 0.0f, 1.0f);
-    float intensity = pow(raw, 1/gamma);
+    float intensity = pow(raw, 1.0f / gamma);
     vec3 depthColor = mix(vec3(1.0f, 1.0f, 0.0f), vec3(1.0f, 0.0f, 0.0f), relativeDepth);
     FragColor = vec4(depthColor * intensity, OUTPUT_ALPHA);
     return;
@@ -213,7 +212,7 @@ void main() {
   //   //raw = 1.0;
   // }
 
-  float intensity = pow(raw, 1/gamma);
+  float intensity = pow(raw, 1.0f / gamma);
   // Viewport overlay composites as `render.rgb + background * (1 - render.a)`.
   FragColor = vec4(vec3(intensity), OUTPUT_ALPHA);
 }

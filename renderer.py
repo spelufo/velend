@@ -529,6 +529,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			};
 		""")
 		shader_info.uniform_buf(0, "VolumeUniforms", "volumeUniforms")
+		shader_info.push_constant('FLOAT', "gamma")
 		if uv:
 			shader_info.define("UV_EDITOR", "1")
 			shader_info.push_constant('FLOAT', "uvOpacity")
@@ -896,6 +897,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		if self.shader is None:
 			return
 		self.pump_uploads()
+		self.shader.bind()
+		self.shader.uniform_float("gamma", context.scene.velend.gamma)
 
 		# Blender clears the color and depth buffers before the engine draws. Writing depth
 		# is what lets it occlude the overlays that are drawn on top of the result.

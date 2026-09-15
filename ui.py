@@ -180,6 +180,10 @@ def _sampling_updated(self, context):
 	VolumeSamplerRenderEngine.reload_shaders()
 
 
+def _gamma_updated(self, context):
+	VolumeSamplerRenderEngine.request_redraw()
+
+
 # Blender does not copy the strings an enum callback returns, so anything they
 # hand out has to outlive the call. Keeping the last list per property is the
 # usual way around it; without it the menus fill with garbage.
@@ -662,6 +666,18 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		options=set(),
 		update=_sampling_updated,
 	)
+	gamma: bpy.props.FloatProperty(
+		name="Gamma",
+		description=(
+			"Intensity curve: output = sampled intensity raised to 1 / Gamma; "
+			"lower values darken midtones"
+		),
+		default=0.45,
+		min=0.01,
+		soft_max=2.0,
+		precision=3,
+		update=_gamma_updated,
+	)
 	invert_sampling_direction: bpy.props.BoolProperty(
 		name="Invert Sampling Direction",
 		description="Sample along the opposite side of the surface normal",
@@ -681,6 +697,10 @@ class SCENE_PT_velend(bpy.types.Panel):
 		layout = self.layout
 		settings = context.scene.velend
 
+		# Fills the three fields above in from a VC3D project, so it sits with
+		# them rather than with the buttons that act on what they name.
+		layout.operator("velend.choose_volpkg", icon='FILE_FOLDER')
+		
 		# Only the fields are split into label and value columns; the buttons
 		# below would be indented into the value column with them. Nothing
 		# here is worth keyframing, so no animate decorators either.
@@ -709,15 +729,12 @@ class SCENE_PT_velend(bpy.types.Panel):
 		field.prop(settings, "resolution")
 		row.operator("velend.set_resolution", text="", icon='GREASEPENCIL')
 
-		# Fills the three fields above in from a VC3D project, so it sits with
-		# them rather than with the buttons that act on what they name.
-		layout.operator("velend.choose_volpkg", icon='FILE_FOLDER')
 
 		layout.operator("velend.setup_scene", icon='SCENE_DATA')
 		row = layout.row(align=True)
-		row.operator("velend.import_tifxyz", text="Import Surface", icon='IMPORT')
-		row.operator("velend.export_tifxyz", text="Export Surface", icon='EXPORT')
-		layout.operator("velend.import_umbilicus", text="Import Umbilicus", icon='IMPORT')
+		# row.operator("velend.import_tifxyz", text="Import Surface", icon='IMPORT')
+		# row.operator("velend.export_tifxyz", text="Export Surface", icon='EXPORT')
+		# layout.operator("velend.import_umbilicus", text="Import Umbilicus", icon='IMPORT')
 
 		status, icon = VolumeSamplerRenderEngine.status()
 		layout.label(text=status, icon=icon)
@@ -745,17 +762,14 @@ class SCENE_PT_velend(bpy.types.Panel):
 				edit.to_volume_id = volume_id
 				# The scale the pair would differ by if that were all they
 				# differ by, the metadata stating transforms in voxels.
-				edit.scale = (
-					settings.scene_resolution / settings.resolution
-					if settings.resolution else 1.0
-				)
+				edit.scale = (settings.scene_resolution / settings.resolution if settings.resolution else 1.0)
 				reload = buttons.operator("velend.reload_metadata", icon='FILE_REFRESH')
 				reload.from_volume_id = settings.scene_volume_id
 				reload.to_volume_id = volume_id
 
-		row = layout.row(align=True)
-		row.operator("velend.load_hires")
-		row.operator("velend.reload_volume", text="", icon='FILE_REFRESH')
+		# row = layout.row(align=True)
+		# row.operator("velend.load_hires")
+		# row.operator("velend.reload_volume", text="", icon='FILE_REFRESH')
 
 
 class RENDER_PT_velend_sampling(bpy.types.Panel):
@@ -774,18 +788,21 @@ class RENDER_PT_velend_sampling(bpy.types.Panel):
 		column = self.layout.column()
 		column.use_property_split = True
 		column.use_property_decorate = False
-		column.prop(settings, "render_depth")
-		column.prop(settings, "num_samples")
-		column.prop(settings, "render_depth_offset")
+		column.prop(settings, "frustum_culling")
+		column.separator()
+		column.prop(settings, "gamma")
+		column.separator()
 		column.prop(settings, "volumetric_rendering")
 		column.prop(settings, "invert_sampling_direction")
+		column.prop(settings, "render_depth")
+		column.prop(settings, "render_depth_offset")
+		column.prop(settings, "num_samples")
 		column.label(
 			text="Sample Distance: %g um" % (
 				settings.render_depth / max(settings.num_samples, 1)
 			)
 		)
 		column.separator()
-		column.prop(settings, "frustum_culling")
 		column.prop(settings, "debug_level_colors")
 		column.prop(settings, "depth_colors")
 
