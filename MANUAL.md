@@ -16,12 +16,12 @@ The surface's coordinate grid becomes a quad mesh with a UV map. A transparent p
 
 File > Export > Volume Cartographer Surface exports a quad mesh whose surviving face vertices lie on a rectangular UV lattice. It crops to their smallest UV rectangle, writes holes inside it with mask 0 and invalid coordinates, and ignores orphan vertices that have no UV face corners. Object transforms are included. Apply or remove modifiers before exporting. Imported metadata and placement are reused, while a new mesh starts with editable UUID, grid scale, and voxel-size defaults. Public FLOAT point attributes become extra TIFF channels.
 
-Raise "Step" to bring a large segment in coarser, one grid point in every n. "Voxel Size" says what the surface's coordinates are in, and starts from the voxel size of the volume being rendered, that being the likeliest one they were traced against, so a segment lands inside the volume it came from and "Load High-Res Volume" renders the scan on it.
+Raise "Step" to bring a large segment in coarser, one grid point in every n. "Coordinates" says whether the tifxyz is in the scene volume's voxels or the volume currently being rendered. It starts at Scene Volume, so surfaces traced in the scan the scene was set up against stay in that frame after switching scans. Choose Rendered Volume for a surface traced in the currently rendered scan. "Voxel Size" starts from the chosen volume and can be corrected independently.
 
 
 ## Umbilici
 
-File > Import > Umbilicus brings an `umbilicus.json`, or the `z, y, x` text form of it, in as a polyline running up the scroll's core. Its points are in full resolution voxels, and "Voxel Size" says whose: the volume being rendered, unless the file states one of its own, which wins.
+File > Import > Umbilicus brings an `umbilicus.json`, or the `z, y, x` text form of it, in as a polyline running up the scroll's core. Like tifxyz import, its "Coordinates" choice defaults to the scene volume rather than the volume currently being rendered. "Voxel Size" starts from that choice; a size stated by the file itself wins.
 
 
 ## UV volume view

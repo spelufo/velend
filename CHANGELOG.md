@@ -1,5 +1,10 @@
-# v0.5.0 (main, unreleased)
+# v0.6.0 (main, unreleased)
 
+# v0.5.0
+
+- Tifxyz and umbilicus imports now default to coordinates in the scene's
+  original volume, with an option to interpret them in the currently rendered
+  volume instead.
 - Shift-right-click in the UV Editor now moves the 3D cursor and retargets
   high-resolution volume loading in Object Mode as well as Edit Mode.
 - Imported tifxyz surfaces carry a lightweight aspect image so Blender's UV

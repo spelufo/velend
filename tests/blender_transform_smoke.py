@@ -13,7 +13,7 @@ if os.environ.get('VELEND_TEST_DEPS'):
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import bpy, json, numpy as np, tempfile, time, zarr
 import velend
-from velend import metadata, ui
+from velend import metadata, tifxyz, ui
 from velend.renderer import VolumeSamplerRenderEngine as E
 # Register modules directly to avoid downloading the catalogue.
 for mod in velend._modules:
@@ -119,6 +119,84 @@ with tempfile.TemporaryDirectory() as tmp:
     assert np.allclose(high, np.array([-4., -48., -176.]) * unit), high
     # Nothing moved the geometry: it means the same place in both volumes.
     assert tuple(bpy.context.scene.cursor.location) == cursor
+
+    # Imports default to the scene volume even while another volume is being
+    # rendered. A tifxyz made in A therefore stays in A's coordinates, and the
+    # renderer carries it through the registration when sampling B.
+    surface_dir = root / 'surface'
+    surface_points = np.array([
+        [[2., 4., 6.], [3., 4., 6.]],
+        [[2., 5., 6.], [3., 5., 6.]],
+    ], dtype=np.float32)
+    tifxyz.write_surface(
+        surface_dir,
+        surface_points,
+        np.ones((2, 2), dtype=np.float32),
+        {},
+        {},
+        'scene-surface',
+        (1.0, 1.0),
+    )
+    assert bpy.ops.velend.import_tifxyz(
+        directory=str(surface_dir), voxel_size=3.240) == {'FINISHED'}
+    surface = bpy.context.active_object
+    surface_world = np.array(surface.data.vertices[0].co)
+    assert np.allclose(surface_world, surface_points[0, 0] * unit), surface_world
+    assert np.allclose(E.to_voxels(surface_world), [11., 21., 30.75])
+    stored = np.asarray(surface['velend_tifxyz_placement']).reshape(4, 4)
+    assert np.allclose(stored, np.diag([unit, unit, unit, 1.])), stored
+    scene_export = root / 'scene-export'
+    assert bpy.ops.velend.export_tifxyz(filepath=str(scene_export)) == {'FINISHED'}
+    exported = np.stack([
+        tifxyz.read_page(scene_export / (axis + '.tif')) for axis in 'xyz'
+    ], axis=-1)
+    assert np.allclose(exported, surface_points), exported
+    bpy.data.objects.remove(surface, do_unlink=True)
+
+    # The explicit alternative retains the old behavior: points are B voxels
+    # and are transformed back into the frame of A for storage in the scene.
+    assert bpy.ops.velend.import_tifxyz(
+        directory=str(surface_dir), voxel_size=7.910,
+        coordinate_space='RENDERED') == {'FINISHED'}
+    surface = bpy.context.active_object
+    surface_world = np.array(surface.data.vertices[0].co)
+    assert np.allclose(E.to_voxels(surface_world), surface_points[0, 0]), surface_world
+    rendered_export = root / 'rendered-export'
+    assert bpy.ops.velend.export_tifxyz(filepath=str(rendered_export)) == {'FINISHED'}
+    exported = np.stack([
+        tifxyz.read_page(rendered_export / (axis + '.tif')) for axis in 'xyz'
+    ], axis=-1)
+    assert np.allclose(exported, surface_points), exported
+    bpy.data.objects.remove(surface, do_unlink=True)
+
+    # Umbilici use the same choice. A size declared in the JSON wins over the
+    # operator's value, while the default still says that its frame is A.
+    umbilicus_path = root / 'umbilicus.json'
+    umbilicus_path.write_text(json.dumps({
+        'control_points': [{'x': 2., 'y': 4., 'z': 6.},
+                           {'x': 3., 'y': 5., 'z': 7.}],
+        'metadata': {'voxelsize_um': 3.240},
+    }))
+    assert bpy.ops.velend.import_umbilicus(
+        filepath=str(umbilicus_path), voxel_size=99.) == {'FINISHED'}
+    axis = bpy.context.active_object
+    axis_world = np.array(axis.data.vertices[0].co)
+    assert np.allclose(axis_world, np.array([2., 4., 6.]) * unit), axis_world
+    assert abs(axis['velend_umbilicus_voxel_size'] - 3.240) < 1e-6
+    bpy.data.objects.remove(axis, do_unlink=True)
+
+    rendered_umbilicus = root / 'rendered-umbilicus.json'
+    rendered_umbilicus.write_text(json.dumps({
+        'control_points': [{'x': 2., 'y': 4., 'z': 6.},
+                           {'x': 3., 'y': 5., 'z': 7.}],
+    }))
+    assert bpy.ops.velend.import_umbilicus(
+        filepath=str(rendered_umbilicus), voxel_size=7.910,
+        coordinate_space='RENDERED') == {'FINISHED'}
+    axis = bpy.context.active_object
+    axis_world = np.array(axis.data.vertices[0].co)
+    assert np.allclose(E.to_voxels(axis_world), [2., 4., 6.]), axis_world
+    bpy.data.objects.remove(axis, do_unlink=True)
 
     # And back, through the inverse of the only direction the sample states.
     load(volume_a)

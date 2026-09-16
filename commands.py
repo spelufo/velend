@@ -388,19 +388,48 @@ class velend_OT_setup_scene(bpy.types.Operator):
 		return {'FINISHED'}
 
 
-def _placement(context, voxel_size):
+_COORDINATE_SPACE_ITEMS = (
+	(
+		'SCENE',
+		"Scene Volume",
+		"Coordinates are in the volume the scene was originally set up against",
+	),
+	(
+		'RENDERED',
+		"Rendered Volume",
+		"Coordinates are in the volume currently being rendered",
+	),
+)
+
+
+def _coordinate_voxel_size(context, coordinate_space):
+	"""The default voxel size for an import coordinate-space choice."""
+	settings = context.scene.velend
+	if coordinate_space == 'SCENE':
+		return settings.scene_resolution or settings.resolution
+	return settings.resolution or settings.scene_resolution
+
+
+def _coordinate_space_updated(self, context):
+	"""Keep an importer's editable voxel size with its chosen volume."""
+	self.voxel_size = _coordinate_voxel_size(context, self.coordinate_space)
+
+
+def _placement(context, voxel_size, coordinate_space='RENDERED'):
 	"""Takes points in voxels `voxel_size` micrometers wide into Blender units.
 
-	A file states its coordinates in the voxels of the volume it was made
-	against, most likely the one being rendered, so they are read as that
-	volume's and brought back the way the renderer takes the scene's coordinates
-	to it. A scene in another volume's frame gets them through the transform
-	registered for the pair, rather than as if the two were the same volume.
+	Coordinates in the scene volume need only their physical scale. Coordinates
+	in the rendered volume are brought back the way the renderer takes the
+	scene's coordinates to it, through any transform registered for the pair.
 	"""
-	matrix = VolumeSamplerRenderEngine.compute_world_from_voxels()
-	scale = voxel_size / (context.scene.velend.resolution or voxel_size)
-	placement = np.array(matrix, dtype=np.float64)
-	placement[:3, :3] *= scale
+	if coordinate_space == 'SCENE':
+		placement = np.eye(4, dtype=np.float64)
+		placement[:3, :3] *= voxel_size / VolumeSamplerRenderEngine.um_per_unit()
+	else:
+		matrix = VolumeSamplerRenderEngine.compute_world_from_voxels()
+		scale = voxel_size / (context.scene.velend.resolution or voxel_size)
+		placement = np.array(matrix, dtype=np.float64)
+		placement[:3, :3] *= scale
 
 	def place(points):
 		return (
@@ -560,6 +589,13 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 	filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
 	directory: bpy.props.StringProperty(subtype='DIR_PATH', options={'SKIP_SAVE'})
 	filter_glob: bpy.props.StringProperty(default="meta.json", options={'HIDDEN'})
+	coordinate_space: bpy.props.EnumProperty(
+		name="Coordinates",
+		description="Which volume's voxel coordinate system the surface uses",
+		items=_COORDINATE_SPACE_ITEMS,
+		default='SCENE',
+		update=_coordinate_space_updated,
+	)
 
 	step: bpy.props.IntProperty(
 		name="Step",
@@ -576,8 +612,8 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 		description=(
 			"Width of a full resolution voxel, in micrometers. Surface "
 			"coordinates are in voxels of the volume they were segmented from, "
-			"so this places them in the scene. Filled in from the voxel size of "
-			"the volume being rendered, which is the likeliest one"
+			"so this places them in the scene. Filled in from the chosen "
+			"coordinate volume"
 		),
 		default=9.362,
 		min=1e-6,
@@ -594,8 +630,8 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 	)
 
 	def invoke(self, context, event):
-		# The volume being rendered is the one a surface most likely belongs to.
-		self.voxel_size = context.scene.velend.resolution
+		self.coordinate_space = 'SCENE'
+		self.voxel_size = _coordinate_voxel_size(context, self.coordinate_space)
 		context.window_manager.fileselect_add(self)
 		return {'RUNNING_MODAL'}
 
@@ -617,7 +653,7 @@ class velend_OT_import_tifxyz(bpy.types.Operator):
 			self.report({'ERROR'}, "No tifxyz surface in %s" % directory)
 			return {'CANCELLED'}
 
-		place = _placement(context, self.voxel_size)
+		place = _placement(context, self.voxel_size, self.coordinate_space)
 		# Only what was just imported ends up selected, when there is a mode
 		# where that means anything.
 		if bpy.ops.object.select_all.poll():
@@ -892,14 +928,20 @@ class velend_OT_import_umbilicus(bpy.types.Operator):
 	filter_glob: bpy.props.StringProperty(
 		default="*.json;*.txt;*.csv", options={'HIDDEN', 'SKIP_SAVE'}
 	)
+	coordinate_space: bpy.props.EnumProperty(
+		name="Coordinates",
+		description="Which volume's voxel coordinate system the points use",
+		items=_COORDINATE_SPACE_ITEMS,
+		default='SCENE',
+		update=_coordinate_space_updated,
+	)
 
 	voxel_size: bpy.props.FloatProperty(
 		name="Voxel Size",
 		description=(
 			"Width of a full resolution voxel, in micrometers, for the volume "
-			"the points were placed in. Filled in from the voxel size of the "
-			"volume being rendered, and overridden by the file when it states "
-			"one of its own"
+			"the points were placed in. Filled in from the chosen coordinate "
+			"volume, and overridden by the file when it states one of its own"
 		),
 		default=9.362,
 		min=1e-6,
@@ -908,8 +950,8 @@ class velend_OT_import_umbilicus(bpy.types.Operator):
 	)
 
 	def invoke(self, context, event):
-		# The volume being rendered is the one an umbilicus most likely belongs to.
-		self.voxel_size = context.scene.velend.resolution
+		self.coordinate_space = 'SCENE'
+		self.voxel_size = _coordinate_voxel_size(context, self.coordinate_space)
 		context.window_manager.fileselect_add(self)
 		return {'RUNNING_MODAL'}
 
@@ -924,10 +966,10 @@ class velend_OT_import_umbilicus(bpy.types.Operator):
 			self.report({'ERROR'}, "Could not read %s: %s" % (os.path.basename(path), error))
 			return {'CANCELLED'}
 
-		# A file that states its own voxel size has said what frame its numbers
-		# are in, which beats what the scene happens to be set to.
+		# A file that states its own voxel size pins the scale of its numbers,
+		# while the coordinate-space choice says which volume frame they use.
 		voxel_size = curve.voxel_size_um or self.voxel_size
-		place = _placement(context, voxel_size)
+		place = _placement(context, voxel_size, self.coordinate_space)
 
 		name = curve.name
 		obj = bpy.data.objects.new(name, _umbilicus_mesh(name, curve, place))
