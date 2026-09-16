@@ -248,9 +248,10 @@ class MirrorTests(unittest.TestCase):
         self.objects['/0/0'] = b'x' * 50
         self.assertEqual(store.get_sync('0/0').to_bytes(), b'x' * 50)
         self.assertEqual(store.budget._bytes, 450)
+        self.assertEqual(mirror.vc3d_cache_usage(), (450, 500))
 
         self.objects['/0/1'] = b'x' * 100
-        with self.assertRaisesRegex(OSError, 'maximum'):
+        with self.assertRaisesRegex(mirror.CacheLimitError, 'maximum'):
             store.get_sync('0/1')
         self.assertFalse((self.cache / '0/1').exists())
         # What is already cached stays readable when the cache is full.

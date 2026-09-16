@@ -14,6 +14,7 @@ import subprocess
 import bpy
 
 from . import metadata
+from . import mirror
 from . import state
 from .renderer import VolumeSamplerRenderEngine
 
@@ -39,6 +40,26 @@ def resolution_from_path(path):
 # None when nothing is waiting. By name, since a timer outlives whatever it was
 # handed.
 _pending_ask = None
+_last_cache_usage = None
+
+
+def _watch_cache_usage():
+	"""Refresh the Scene panel when the background cache count changes."""
+	global _last_cache_usage
+	window_manager = bpy.context.window_manager
+	if window_manager is None:
+		return 1.0
+	areas = [
+		area for window in window_manager.windows for area in window.screen.areas
+		if area.type == 'PROPERTIES' and area.spaces.active.context == 'SCENE'
+	]
+	if areas:
+		usage = mirror.vc3d_cache_usage()
+		if usage != _last_cache_usage:
+			_last_cache_usage = usage
+			for area in areas:
+				area.tag_redraw()
+	return 1.0
 
 
 def _volume_resolution(settings, volume_id):
@@ -738,6 +759,19 @@ class SCENE_PT_velend(bpy.types.Panel):
 
 		status, icon = VolumeSamplerRenderEngine.status()
 		layout.label(text=status, icon=icon)
+		used, maximum = mirror.vc3d_cache_usage()
+		if maximum is None:
+			layout.label(text="VC3D cache: no size limit", icon='INFO')
+		elif maximum:
+			if used is None:
+				layout.label(text="VC3D cache: measuring...", icon='INFO')
+			else:
+				percent = 100.0 * used / maximum
+				layout.progress(
+					factor=min(used / maximum, 1.0),
+					text="VC3D cache: %.1f%% full" % percent,
+				)
+				layout.label(text="%.1f / %.1f GiB" % (used / (1 << 30), maximum / (1 << 30)))
 		volume_id = metadata.volume_id_for(settings.source_url, settings.volume_path)
 		if settings.scene_volume_id and settings.scene_volume_id != volume_id:
 			# Short lines: the panel is narrow at its default width, and a label
@@ -842,9 +876,13 @@ def register():
 	bpy.types.Scene.velend = bpy.props.PointerProperty(type=VelendSceneSettings)
 	if _load_post not in bpy.app.handlers.load_post:
 		bpy.app.handlers.load_post.append(_load_post)
+	if not bpy.app.timers.is_registered(_watch_cache_usage):
+		bpy.app.timers.register(_watch_cache_usage, persistent=True)
 
 
 def unregister():
+	if bpy.app.timers.is_registered(_watch_cache_usage):
+		bpy.app.timers.unregister(_watch_cache_usage)
 	if _load_post in bpy.app.handlers.load_post:
 		bpy.app.handlers.load_post.remove(_load_post)
 	del bpy.types.Scene.velend

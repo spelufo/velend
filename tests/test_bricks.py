@@ -49,6 +49,24 @@ class VoxelArray:
 
 
 class BrickTests(unittest.TestCase):
+	def test_cache_limit_error_is_queued_once_for_main_thread_reporting(self):
+		class FullCacheArray:
+			shape = (64, 64, 64)
+
+			def __getitem__(self, index):
+				error = OSError('cache maximum reached')
+				error.cache_limit = True
+				raise error
+
+		loader = bricks.BrickLoader([FullCacheArray()])
+		try:
+			loader._load((0, 1), (0, 0, 0))
+			loader._load((0, 2), (0, 0, 0))
+			self.assertEqual(loader.take_cache_limit_error(), 'cache maximum reached')
+			self.assertIsNone(loader.take_cache_limit_error())
+		finally:
+			loader.shutdown()
+
 	def test_read_brick_clips_to_the_array_and_pads_the_boundary(self):
 		array = FakeArray((4, 5, 6))
 		brick = bricks.read_brick(array, (0, 0, 0))

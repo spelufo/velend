@@ -29,9 +29,9 @@ File > Export > Scroll Umbilicus writes the active mesh as `umbilicus.json`, wit
 
 1. Setup the scene.
 2. Move the "Cut Z" plane all the way down to where you first see the umbilicus.
-3. `shift+d` to duplicate, `z` for the z direction and `5` (um) or whatever distance between samples you need to make a good umbilicus. `enter`. `shift+r` to repeat that action until you cover all the z you need for the scroll.
+3. `shift+d` to duplicate, `z` for the z direction and `5` mm or whatever distance between samples you need to make a good umbilicus. `enter`. `shift+r` to repeat that action until you cover all the z you need for the scroll.
 4. Split the viewport and align one view to the xy plane in rendered mode, and a side view plane in wireframe mode. Hide all the cut planes except the bottom most.
-5. `shift+a` > create a plane. Go into edit mode (`tab`). Delete 3 of the 4 vertices. `e` to extrude the remaining vertex, `z`, `5` to do extrude it 5um up z. `shift+r` to repeat until covering the z you need.
+5. `shift+a` > create a plane. Go into edit mode (`tab`). Delete 3 of the 4 vertices. `e` to extrude the remaining vertex, `z`, `5` to do extrude it 5 mm up z. `shift+r` to repeat until covering the z you need.
 6. Now do this in a loop:
   - select the next vertex from the bottom in the side view.
   - hit `g` on the top view to move it, and drag it to where you see the umbilicus. `enter`

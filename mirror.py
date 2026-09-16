@@ -21,7 +21,14 @@ _LOCKS = weakref.WeakValueDictionary()
 _METADATA = {'.zarray', '.zattrs', '.zgroup', '.zmetadata', 'zarr.json'}
 _GIB = 1 << 30
 
-LOG_MIRROR_OPS = True
+LOG_MIRROR_OPS = False
+
+
+class CacheLimitError(OSError):
+    """A chunk was refused because VC3D's configured cache maximum was reached."""
+
+    cache_limit = True
+
 
 def _object_lock(path):
     with _LOCKS_GUARD:
@@ -115,7 +122,7 @@ class CacheBudget:
         if maximum is not None and total is not None and total + size > maximum:
             # Only VC3D evicts, so a rescan is what picks the room back up.
             self.scan()
-            raise OSError(
+            raise CacheLimitError(
                 "VC3D's cache is at the %s maximum its settings allow "
                 '(%s used): not downloading into %s'
                 % (_gib(maximum), _gib(total), self.root))
@@ -125,6 +132,12 @@ class CacheBudget:
         with self._lock:
             if self._bytes is not None:
                 self._bytes += size
+
+    def usage(self):
+        """Current byte count and configured maximum, or None while scanning."""
+        self.scan()
+        with self._lock:
+            return self._bytes, self.maximum
 
     def scan(self):
         """Total the root on a thread, unless one is running or just did."""
@@ -174,6 +187,12 @@ def budget_for(path):
             budget = _BUDGETS[root] = CacheBudget(root)
     budget.configure(maximum, minimum_free)
     return budget
+
+
+def vc3d_cache_usage():
+    """The shared VC3D cache's byte count and maximum for the Scene panel."""
+    root = Path(volpkg.remote_cache_root()).resolve()
+    return budget_for(root).usage()
 
 
 class CacheLease:

@@ -948,9 +948,27 @@ def _watch_streaming():
 	if VolumeSamplerRenderEngine.load_future is not None:
 		VolumeSamplerRenderEngine.request_redraw()
 	loader = VolumeSamplerRenderEngine.loader
+	if loader is not None:
+		cache_error = loader.take_cache_limit_error()
+		if cache_error:
+			bpy.ops.velend.report_cache_limit('EXEC_DEFAULT', message=cache_error)
 	if loader is not None and not loader.idle():
 		VolumeSamplerRenderEngine.request_redraw()
 	return _STREAM_WATCH_INTERVAL
+
+
+class velend_OT_report_cache_limit(bpy.types.Operator):
+	"""Put a cache limit failure in Blender's Info editor and status reports."""
+
+	bl_idname = "velend.report_cache_limit"
+	bl_label = "Report Cache Limit"
+	bl_options = {'INTERNAL'}
+
+	message: bpy.props.StringProperty()
+
+	def execute(self, context):
+		self.report({'ERROR'}, "Velend could not load volume bricks: %s" % self.message)
+		return {'FINISHED'}
 
 
 def _watch_cursor():
@@ -1001,6 +1019,7 @@ def _load_post(_file_path):
 
 def register():
 	bpy.utils.register_class(VolumeSamplerRenderEngine)
+	bpy.utils.register_class(velend_OT_report_cache_limit)
 	if _load_post not in bpy.app.handlers.load_post:
 		bpy.app.handlers.load_post.append(_load_post)
 	if not bpy.app.timers.is_registered(_watch_shader_files):
@@ -1029,6 +1048,7 @@ def unregister():
 	if VolumeSamplerRenderEngine.loader is not None:
 		VolumeSamplerRenderEngine.loader.shutdown()
 		VolumeSamplerRenderEngine.loader = None
+	bpy.utils.unregister_class(velend_OT_report_cache_limit)
 	bpy.utils.unregister_class(VolumeSamplerRenderEngine)
 
 

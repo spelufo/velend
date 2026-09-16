@@ -214,6 +214,8 @@ class BrickLoader:
 			max_workers=LOADER_THREADS, thread_name_prefix="velend-brick"
 		)
 		self.lock = threading.Lock()
+		self.cache_limit_error = None
+		self.cache_limit_reported = False
 		# key -> Future, so a stale request can still be cancelled while it's
 		# only sitting in the executor's queue rather than actually reading.
 		self.inflight = {}
@@ -250,8 +252,19 @@ class BrickLoader:
 		except Exception as error:
 			self.error = "L%d brick load failed: %s" % (level, error)
 			print("velend: L%d brick load failed at" % level, chunk_xyz, error)
+			if getattr(error, 'cache_limit', False):
+				with self.lock:
+					if not self.cache_limit_reported:
+						self.cache_limit_error = str(error)
+						self.cache_limit_reported = True
 			brick = None
 		self.done.put((request_key, brick))
+
+	def take_cache_limit_error(self):
+		"""Return the first cache limit error for reporting from Blender's main thread."""
+		with self.lock:
+			error, self.cache_limit_error = self.cache_limit_error, None
+			return error
 
 	def drain(self, limit):
 		"""Pop results containing a brick, EMPTY_BRICK, or None on failure."""
