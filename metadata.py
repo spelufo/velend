@@ -15,6 +15,7 @@ import os
 import re
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from email.utils import formatdate
@@ -231,6 +232,26 @@ def volume_id_for(*locations):
 		if match:
 			return match.group(1)
 	return ""
+
+
+def source_volume_for(scene_volume_id, source_url="", volume_path=""):
+	"""The volume the scene's coordinates use, for umbilicus metadata.
+
+	Prefer the catalogue's sample-relative path. If the scene volume is not in
+	the catalogue, its configured location is usable while it is still current;
+	after a switch, only the saved scene volume id still names that frame.
+	"""
+	volume = VOLUMES.get(scene_volume_id)
+	if volume is not None:
+		url = volume.zarr_url
+		name = os.path.basename(urllib.parse.urlsplit(url).path.rstrip("/")) if url else ""
+		name = name or volume.long_id
+		if not name.endswith(".zarr"):
+			name += ".zarr"
+		return "%s/volumes/%s" % (volume.sample.id, name)
+	if scene_volume_id and scene_volume_id != volume_id_for(source_url, volume_path):
+		return scene_volume_id
+	return source_url.strip() or volume_path.strip() or scene_volume_id
 
 
 def _affine(rows):

@@ -6,6 +6,7 @@ import bmesh
 import bpy
 import numpy as np
 
+from . import metadata as volume_metadata
 from . import state
 from . import tifxyz
 from . import umbilicus
@@ -911,6 +912,9 @@ def _umbilicus_mesh(name, curve, place):
 	mesh.edges.add(len(curve.edges))
 	mesh.vertices.foreach_set("co", positions.ravel())
 	mesh.edges.foreach_set("vertices", curve.edges.ravel())
+	if curve.scores is not None:
+		attribute = mesh.attributes.new("score", 'FLOAT', 'POINT')
+		attribute.data.foreach_set("value", curve.scores)
 	mesh.update()
 	mesh.validate()
 	return mesh
@@ -977,6 +981,9 @@ class velend_OT_import_umbilicus(bpy.types.Operator):
 		# or export does not have to be told again.
 		obj["velend_umbilicus_path"] = curve.path
 		obj["velend_umbilicus_voxel_size"] = voxel_size
+		obj["velend_umbilicus_coordinate_space"] = self.coordinate_space
+		obj["velend_umbilicus_metadata"] = json.dumps(curve.metadata)
+		obj["velend_umbilicus_placement"] = place.matrix.ravel().tolist()
 		context.scene.collection.objects.link(obj)
 		if bpy.ops.object.select_all.poll():
 			bpy.ops.object.select_all(action='DESELECT')
@@ -995,6 +1002,116 @@ class velend_OT_import_umbilicus(bpy.types.Operator):
 		return {'FINISHED'}
 
 
+class velend_OT_export_umbilicus(bpy.types.Operator):
+	bl_idname = "velend.export_umbilicus"
+	bl_label = "Export Umbilicus"
+	bl_description = "Export the active mesh's single connected line as an umbilicus.json"
+	bl_options = {'REGISTER'}
+
+	filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
+	filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN', 'SKIP_SAVE'})
+	coordinate_space: bpy.props.EnumProperty(
+		name="Coordinates",
+		description="Which volume's voxel coordinate system the exported points use",
+		items=_COORDINATE_SPACE_ITEMS,
+		default='SCENE',
+		update=_coordinate_space_updated,
+	)
+	voxel_size: bpy.props.FloatProperty(
+		name="Voxel Size", default=9.362, min=1e-6, soft_max=100.0, precision=3,
+	)
+	overwrite: bpy.props.BoolProperty(
+		name="Replace Existing File", default=False,
+		description="Allow replacing an existing umbilicus JSON file",
+	)
+
+	@classmethod
+	def poll(cls, context):
+		return context.active_object is not None and context.active_object.type == 'MESH'
+
+	def draw(self, context):
+		layout = self.layout
+		layout.prop(self, "coordinate_space")
+		layout.prop(self, "voxel_size")
+		layout.prop(self, "overwrite")
+
+	def invoke(self, context, event):
+		obj = context.active_object
+		self.coordinate_space = obj.get("velend_umbilicus_coordinate_space", 'SCENE')
+		self.voxel_size = float(obj.get(
+			"velend_umbilicus_voxel_size",
+			_coordinate_voxel_size(context, self.coordinate_space),
+		))
+		source = obj.get("velend_umbilicus_path")
+		self.filepath = (
+			os.path.splitext(str(source))[0] + ".json" if source else
+			os.path.join(os.getcwd(), bpy.path.clean_name(obj.name) + "_umbilicus.json")
+		)
+		context.window_manager.fileselect_add(self)
+		return {'RUNNING_MODAL'}
+
+	def execute(self, context):
+		obj = context.active_object
+		if not self.filepath.strip():
+			self.report({'ERROR'}, "No export file selected")
+			return {'CANCELLED'}
+		path = os.path.expanduser(bpy.path.abspath(self.filepath.strip()))
+		if os.path.splitext(path)[1].lower() != ".json":
+			self.report({'ERROR'}, "Umbilicus export must be a .json file")
+			return {'CANCELLED'}
+		if os.path.exists(path) and not self.overwrite:
+			self.report({'ERROR'}, "Target exists; enable replacement to export")
+			return {'CANCELLED'}
+		if obj.modifiers:
+			self.report({'ERROR'}, "Apply or remove modifiers before exporting umbilicus")
+			return {'CANCELLED'}
+
+		try:
+			if obj.mode == 'EDIT':
+				obj.update_from_editmode()
+			mesh = obj.data
+			if mesh.polygons:
+				raise ValueError("the mesh must have edges only, without faces")
+			points = np.empty((len(mesh.vertices), 3), dtype=np.float64)
+			edges = np.empty((len(mesh.edges), 2), dtype=np.int32)
+			mesh.vertices.foreach_get("co", points.ravel())
+			mesh.edges.foreach_get("vertices", edges.ravel())
+			scores = None
+			attribute = mesh.attributes.get("score")
+			if attribute is not None:
+				if attribute.domain != 'POINT' or attribute.data_type != 'FLOAT':
+					raise ValueError("the score attribute must be a FLOAT point attribute")
+				scores = np.empty(len(mesh.vertices), dtype=np.float32)
+				attribute.data.foreach_get("value", scores)
+			world = np.asarray(obj.matrix_world, dtype=np.float64)
+			points = points @ world[:3, :3].T + world[:3, 3]
+			stored = obj.get("velend_umbilicus_placement")
+			original_space = obj.get("velend_umbilicus_coordinate_space")
+			original_size = obj.get("velend_umbilicus_voxel_size")
+			if (stored is not None and self.coordinate_space == original_space
+					and original_size is not None
+					and math.isclose(self.voxel_size, float(original_size), rel_tol=1e-6)):
+				placement = np.asarray(stored, dtype=np.float64).reshape(4, 4)
+			else:
+				placement = _placement(context, self.voxel_size, self.coordinate_space).matrix
+			inverse = np.linalg.inv(placement)
+			points = points @ inverse[:3, :3].T + inverse[:3, 3]
+			metadata = json.loads(obj.get("velend_umbilicus_metadata", "{}"))
+			settings = context.scene.velend
+			source_volume = volume_metadata.source_volume_for(
+				settings.scene_volume_id, settings.source_url, settings.volume_path
+			)
+			metadata = umbilicus.export_metadata(metadata, source_volume)
+			umbilicus.write_umbilicus(
+				path, points, edges, self.voxel_size, metadata, scores=scores
+			)
+		except Exception as error:
+			self.report({'ERROR'}, "Could not export umbilicus: %s" % error)
+			return {'CANCELLED'}
+		self.report({'INFO'}, "Exported %d umbilicus points" % len(points))
+		return {'FINISHED'}
+
+
 def _view_menu(self, context):
 	self.layout.operator(velend_OT_load_hires.bl_idname)
 
@@ -1008,6 +1125,10 @@ def _export_menu(self, context):
 	self.layout.operator(
 		velend_OT_export_tifxyz.bl_idname,
 		text="Volume Cartographer Surface (tifxyz)",
+	)
+	self.layout.operator(
+		velend_OT_export_umbilicus.bl_idname,
+		text="Scroll Umbilicus (umbilicus.json)",
 	)
 
 
@@ -1032,6 +1153,7 @@ def register():
 	bpy.utils.register_class(velend_OT_setup_tifxyz_uv_aspect)
 	bpy.utils.register_class(velend_OT_export_tifxyz)
 	bpy.utils.register_class(velend_OT_import_umbilicus)
+	bpy.utils.register_class(velend_OT_export_umbilicus)
 	bpy.types.VIEW3D_MT_view.append(_view_menu)
 	bpy.types.VIEW3D_MT_object.append(_object_menu)
 	bpy.types.TOPBAR_MT_file_import.append(_import_menu)
@@ -1043,6 +1165,7 @@ def unregister():
 	bpy.types.TOPBAR_MT_file_import.remove(_import_menu)
 	bpy.types.VIEW3D_MT_object.remove(_object_menu)
 	bpy.types.VIEW3D_MT_view.remove(_view_menu)
+	bpy.utils.unregister_class(velend_OT_export_umbilicus)
 	bpy.utils.unregister_class(velend_OT_import_umbilicus)
 	bpy.utils.unregister_class(velend_OT_export_tifxyz)
 	bpy.utils.unregister_class(velend_OT_setup_tifxyz_uv_aspect)

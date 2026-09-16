@@ -23,6 +23,22 @@ Raise "Step" to bring a large segment in coarser, one grid point in every n. "Co
 
 File > Import > Umbilicus brings an `umbilicus.json`, or the `z, y, x` text form of it, in as a polyline running up the scroll's core. Like tifxyz import, its "Coordinates" choice defaults to the scene volume rather than the volume currently being rendered. "Voxel Size" starts from that choice; a size stated by the file itself wins.
 
+File > Export > Scroll Umbilicus writes the active mesh as `umbilicus.json`, with `control_points` containing `x`, `y`, and `z` objects and a `score` for vertices that have that point attribute. The mesh must be one open line of at least two vertices joined by edges, with no branches, loose vertices, cycles, or faces. Its path must run upward in the volume's Z coordinate, since Volume Cartographer sorts umbilicus points by Z when reading them. Object transforms are included; apply or remove modifiers first. An imported umbilicus keeps its original coordinate placement and other metadata by default. Export stamps `timestamp`, `created`, and `modified` with the current UTC time, sets `source_volume` to the scene volume, and records Velend in `annotator_note`. For a new mesh, choose the volume coordinate frame and voxel size in the export dialog. Replacing an existing file requires enabling "Replace Existing File".
+
+### Recommended workflow to trace umbilici (about 10 min on PHerc 0175A)
+
+1. Setup the scene.
+2. Move the "Cut Z" plane all the way down to where you first see the umbilicus.
+3. `shift+d` to duplicate, `z` for the z direction and `5` (um) or whatever distance between samples you need to make a good umbilicus. `enter`. `shift+r` to repeat that action until you cover all the z you need for the scroll.
+4. Split the viewport and align one view to the xy plane in rendered mode, and a side view plane in wireframe mode. Hide all the cut planes except the bottom most.
+5. `shift+a` > create a plane. Go into edit mode (`tab`). Delete 3 of the 4 vertices. `e` to extrude the remaining vertex, `z`, `5` to do extrude it 5um up z. `shift+r` to repeat until covering the z you need.
+6. Now do this in a loop:
+  - select the next vertex from the bottom in the side view.
+  - hit `g` on the top view to move it, and drag it to where you see the umbilicus. `enter`
+  - unhide the next cut plane, the one for the next vertex going up
+7. Can confirm if it is good enough by hiding all the planes again except one and moving it slowly in `z` while looking in the top view.
+8. File > Export > Scroll Umbilicus (umbilicus.json)
+
 
 ## UV volume view
 

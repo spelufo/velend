@@ -1,4 +1,4 @@
-"""Reading umbilicus files: the scroll's axis, as a polyline through the volume.
+"""Reading and writing umbilicus files: the scroll's axis through the volume.
 
 An umbilicus marks the centre of the spiral on each slice, so a handful of
 control points up the scroll say where its core runs. The file is a list of
@@ -16,12 +16,12 @@ the volume the points were placed in does the file pin its own frame.
 	https://github.com/AlexeyDrobkovStrikesBack/herculaneum-umbilici
 
 Nothing here imports bpy, so all of it can be tested outside Blender.
-`commands.velend_OT_import_umbilicus` turns what `read_umbilicus` returns into
-a mesh of vertices joined by edges.
+The operators turn these points into a mesh of vertices joined by edges and back.
 """
 
 import json
 import os
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -136,14 +136,15 @@ class Umbilicus:
 
 	`positions` are in voxels, one row per vertex, sorted up the scroll; `edges`
 	join each to the next. `metadata` is what the file said about itself, as it
-	was written.
+	was written. `scores` holds per-point confidence when every source point has it.
 	"""
 
-	def __init__(self, path, metadata, positions, edges):
+	def __init__(self, path, metadata, positions, edges, scores=None):
 		self.path = path
 		self.metadata = metadata
 		self.positions = positions
 		self.edges = edges
+		self.scores = scores
 
 	@property
 	def name(self):
@@ -197,6 +198,7 @@ def umbilicus_arrays(points):
 def read_umbilicus(path):
 	"""Read an umbilicus file into the arrays a mesh is built from."""
 	metadata = {}
+	scores = None
 	if os.path.splitext(path)[1].lower() in TEXT_SUFFIXES:
 		with open(path) as file:
 			points = text_points(file)
@@ -205,7 +207,113 @@ def read_umbilicus(path):
 			document = json.load(file)
 		points = json_points(document)
 		metadata = json_metadata(document)
+		entries = document if isinstance(document, list) else next(
+			(document[key] for key in POINT_KEYS if key in document), []
+		)
+		values = [entry.get("score") if isinstance(entry, dict) else None for entry in entries]
+		if values and all(
+			isinstance(value, (int, float)) and not isinstance(value, bool)
+			and np.isfinite(value) for value in values
+		):
+			order = np.argsort([point[2] for point in points], kind="stable")
+			scores = np.asarray(values, dtype=np.float32)[order]
 	if not points:
 		raise ValueError("no points")
 	positions, edges = umbilicus_arrays(points)
-	return Umbilicus(path, metadata, positions, edges)
+	return Umbilicus(path, metadata, positions, edges, scores)
+
+
+def _ordered_polyline(points, edges):
+	"""Return a single edge-connected line's points and original vertex indices.
+
+	VC sorts control points by z when reading them, so a line that doubles back
+	in z cannot be written without changing its connections on the next import.
+	"""
+	points = np.asarray(points, dtype=np.float64)
+	edges = np.asarray(edges)
+	if points.ndim != 2 or points.shape[1] != 3 or len(points) < 2:
+		raise ValueError("the mesh needs at least two vertices")
+	if not np.isfinite(points).all():
+		raise ValueError("vertex coordinates must be finite")
+	if edges.shape != (len(points) - 1, 2) or not np.issubdtype(edges.dtype, np.integer):
+		raise ValueError("the mesh must have one edge between each pair of line vertices")
+	if ((edges < 0) | (edges >= len(points))).any():
+		raise ValueError("an edge refers to a vertex outside the mesh")
+
+	neighbors = [[] for _ in points]
+	for a, b in edges:
+		if a == b or b in neighbors[a]:
+			raise ValueError("the line has a repeated or self-connected edge")
+		neighbors[a].append(b)
+		neighbors[b].append(a)
+	if any(len(adjacent) not in (1, 2) for adjacent in neighbors):
+		raise ValueError("the mesh must be one line without branches or loose vertices")
+	ends = [index for index, adjacent in enumerate(neighbors) if len(adjacent) == 1]
+	if len(ends) != 2:
+		raise ValueError("the mesh must be an open line")
+	start = min(ends, key=lambda index: (points[index, 2], index))
+	ordered = [start]
+	previous = -1
+	while True:
+		following = [index for index in neighbors[ordered[-1]] if index != previous]
+		if not following:
+			break
+		previous = ordered[-1]
+		ordered.append(following[0])
+	if len(ordered) != len(points):
+		raise ValueError("the mesh contains disconnected lines or a cycle")
+	result = points[ordered]
+	if (np.diff(result[:, 2]) < -0.01).any():
+		raise ValueError("the line doubles back in z; umbilicus files are sorted by z")
+	# Inverting the import placement can leave tiny z reversals at equal-height
+	# points. Keep their edge order stable under VC's z sort.
+	result[:, 2] = np.maximum.accumulate(result[:, 2])
+	return result, ordered
+
+
+def ordered_polyline(points, edges):
+	"""Return a single edge-connected line's points, from low to high z."""
+	return _ordered_polyline(points, edges)[0]
+
+
+def export_metadata(metadata, source_volume, now=None):
+	"""Update provenance fields for one export, using one UTC instant."""
+	if not source_volume:
+		raise ValueError("set a scene volume before exporting an umbilicus")
+	now = now or datetime.now(timezone.utc)
+	stamp = now.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+	result = dict(metadata or {})
+	result.update({
+		"timestamp": stamp,
+		"created": stamp,
+		"modified": stamp,
+		"source_volume": source_volume,
+		"annotator_note": "exported from blender using velend",
+	})
+	return result
+
+
+def write_umbilicus(path, points, edges, voxel_size, metadata=None, scores=None):
+	"""Write a connected mesh line as VC-compatible JSON in full-resolution voxels."""
+	ordered, indices = _ordered_polyline(points, edges)
+	voxel_size = _positive(voxel_size)
+	if voxel_size is None:
+		raise ValueError("voxel size must be positive and finite")
+	if scores is not None:
+		scores = np.asarray(scores, dtype=np.float64)
+		if scores.shape != (len(ordered),) or not np.isfinite(scores).all():
+			raise ValueError("scores must be one finite number per vertex")
+	metadata = dict(metadata or {})
+	metadata["voxelsize_um"] = voxel_size
+	metadata["total_points"] = len(ordered)
+	control_points = []
+	for row, vertex_index in zip(ordered, indices):
+		point = dict(zip("xyz", row.tolist()))
+		if scores is not None:
+			score = float(scores[vertex_index])
+			point["score"] = int(score) if score.is_integer() else score
+		control_points.append(point)
+	document = {"control_points": control_points, "metadata": metadata}
+	contents = json.dumps(document, indent=2, allow_nan=False) + "\n"
+	with open(path, "w") as file:
+		file.write(contents)

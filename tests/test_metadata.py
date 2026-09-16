@@ -92,6 +92,18 @@ class VolumeTransformTests(unittest.TestCase):
     def tearDown(self):
         metadata.SAMPLES, metadata.SCANS, metadata.VOLUMES, metadata.SEGMENTS = self.previous
 
+    def test_scene_volume_source_uses_the_scene_frame_after_a_render_switch(self):
+        source = metadata.source_volume_for(
+            '20231027191953', '', '/cache/20231117143551-7.910um.zarr'
+        )
+        self.assertEqual(source, 'PHercTest/volumes/20231027191953-3.240um.zarr')
+
+    def test_uncatalogued_scene_volume_falls_back_to_its_saved_id(self):
+        source = metadata.source_volume_for(
+            '19000101000000', '', '/cache/20231117143551-7.910um.zarr'
+        )
+        self.assertEqual(source, '19000101000000')
+
     def test_the_registered_direction_comes_out_as_stated(self):
         matrix = metadata.volume_transform('20231027191953', '20231117143551')
         np.testing.assert_allclose(matrix, [

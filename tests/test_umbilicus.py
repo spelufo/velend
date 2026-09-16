@@ -1,5 +1,6 @@
 import importlib.util
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import tempfile
@@ -112,6 +113,7 @@ class ReadTest(unittest.TestCase):
 		self.assertEqual(curve.name, "PHerc1203_umbilicus")
 		np.testing.assert_allclose(curve.positions[0], [3452.0, 2992.0, 2320.0])
 		self.assertEqual(curve.edges.tolist(), [[0, 1]])
+		self.assertEqual(curve.scores.tolist(), [100.0, 100.0])
 		# Nothing in that metadata pins the frame the coordinates are in.
 		self.assertIsNone(curve.voxel_size_um)
 		self.assertIsNone(curve.volume_shape)
@@ -160,6 +162,93 @@ class ReadTest(unittest.TestCase):
 	def test_an_empty_file_is_refused(self):
 		with self.assertRaises(ValueError):
 			umbilicus.read_umbilicus(write_json("umbilicus.json", []))
+
+
+class ExportTest(unittest.TestCase):
+	def test_export_metadata_replaces_source_and_all_timestamps(self):
+		now = datetime(2026, 9, 16, 14, 51, 5, tzinfo=timezone.utc)
+		result = umbilicus.export_metadata(
+			{"source_volume": "old", "timestamp": "old", "other": 42},
+			"PHerc1203/volumes/scan.zarr", now,
+		)
+		stamp = "2026-09-16T14:51:05Z"
+		self.assertEqual([result[key] for key in ("timestamp", "created", "modified")],
+			[stamp, stamp, stamp])
+		self.assertEqual(result["source_volume"], "PHerc1203/volumes/scan.zarr")
+		self.assertEqual(result["annotator_note"], "exported from blender using velend")
+		self.assertEqual(result["other"], 42)
+		with self.assertRaisesRegex(ValueError, "scene volume"):
+			umbilicus.export_metadata({}, "", now)
+
+	def test_line_order_comes_from_edges_even_when_vertex_indices_are_scrambled(self):
+		points = [[30, 0, 3], [10, 0, 1], [20, 0, 2]]
+		edges = [[0, 2], [1, 2]]
+		ordered = umbilicus.ordered_polyline(points, edges)
+		self.assertEqual(ordered[:, 0].tolist(), [10, 20, 30])
+
+	def test_branch_cycle_disconnected_and_loose_vertex_are_refused(self):
+		cases = [
+			(4, [[0, 1], [1, 2], [1, 3]]),
+			(4, [[0, 1], [1, 2], [2, 0]]),
+			(5, [[0, 1], [1, 2], [2, 0], [3, 4]]),
+			(3, [[0, 1]]),
+		]
+		for count, edges in cases:
+			with self.subTest(edges=edges), self.assertRaises(ValueError):
+				umbilicus.ordered_polyline([[0, 0, z] for z in range(count)], edges)
+
+	def test_a_line_that_doubles_back_in_z_is_refused(self):
+		with self.assertRaisesRegex(ValueError, "doubles back"):
+			umbilicus.ordered_polyline(
+				[[0, 0, 1], [0, 0, 3], [0, 0, 2]], [[0, 1], [1, 2]]
+			)
+
+	def test_tiny_z_roundoff_at_equal_height_keeps_edge_order(self):
+		points = umbilicus.ordered_polyline(
+			[[0, 0, 1], [1, 0, 1 - 1e-6], [2, 0, 2]], [[0, 1], [1, 2]]
+		)
+		self.assertEqual(points[:, 0].tolist(), [0, 1, 2])
+		self.assertEqual(points[:2, 2].tolist(), [1, 1])
+
+	def test_written_json_round_trips_and_keeps_metadata(self):
+		path = Path(tempfile.mkdtemp()) / "umbilicus.json"
+		umbilicus.write_umbilicus(
+			path, [[30, 0, 3], [10, 0, 1], [20, 0, 2]], [[0, 2], [1, 2]],
+			7.91, {"source_volume": "scan.zarr", "total_points": 99},
+			scores=[30, 10, 20],
+		)
+		document = json.loads(path.read_text())
+		self.assertEqual(document["control_points"], [
+			{"x": 10.0, "y": 0.0, "z": 1.0, "score": 10},
+			{"x": 20.0, "y": 0.0, "z": 2.0, "score": 20},
+			{"x": 30.0, "y": 0.0, "z": 3.0, "score": 30},
+		])
+		self.assertEqual(document["metadata"], {
+			"source_volume": "scan.zarr", "total_points": 3, "voxelsize_um": 7.91,
+		})
+		curve = umbilicus.read_umbilicus(path)
+		self.assertEqual(curve.edges.tolist(), [[0, 1], [1, 2]])
+		self.assertEqual(curve.positions[:, 0].tolist(), [10, 20, 30])
+		self.assertEqual(curve.scores.tolist(), [10.0, 20.0, 30.0])
+
+	def test_new_mesh_writes_no_unearned_score(self):
+		path = Path(tempfile.mkdtemp()) / "umbilicus.json"
+		umbilicus.write_umbilicus(path, [[1, 2, 3], [4, 5, 6]], [[0, 1]], 9.362)
+		document = json.loads(path.read_text())
+		self.assertEqual(document["control_points"], [
+			{"x": 1.0, "y": 2.0, "z": 3.0},
+			{"x": 4.0, "y": 5.0, "z": 6.0},
+		])
+		self.assertEqual(document["metadata"]["total_points"], 2)
+
+	def test_invalid_metadata_does_not_replace_an_existing_file(self):
+		path = Path(tempfile.mkdtemp()) / "umbilicus.json"
+		path.write_text("old file")
+		with self.assertRaises(TypeError):
+			umbilicus.write_umbilicus(
+				path, [[0, 0, 1], [0, 0, 2]], [[0, 1]], 7.91, {"bad": object()}
+			)
+		self.assertEqual(path.read_text(), "old file")
 
 
 if __name__ == "__main__":
