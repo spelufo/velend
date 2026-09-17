@@ -64,7 +64,7 @@ A transform that has not reached the published metadata yet can be supplied thro
 
 The Volume Sampler engine shades the meshes already in the scene with the scan. Every fragment looks the volume up where its surface sits, averaging a few samples along the face normal to thin out the noise the sheets are embedded in, so a plane through the volume comes out a slice of it and an imported segment comes out the sheet it was traced from. Where nothing is loaded the fragment is dropped rather than painted, which is what a mesh you can see through means.
 
-"Volumetric Rendering", under Render > Volume Sampling, treats those samples as material along a ray: brighter samples absorb more of it and progressively obscure samples behind them. Turn it off for the ordinary depth-weighted average.
+"Volumetric Rendering", under Render > Volume Sampling, treats those samples as material along a ray: brighter samples absorb more of it and progressively obscure samples behind them. "Transmittance Factor" sets the absorption strength from 0 (none) to 1 (strongest). Turn volumetric rendering off for the ordinary depth-weighted average.
 
 Only what a mesh touches is ever read. A scroll is far larger than any GPU's memory, so the triangles of every visible mesh are walked into a grid of cubic chunks, 64 voxels to a side, and those are the chunks that stream: each one is read from the zarr and uploaded into a slot of a texture atlas the shader finds through a page table. A chunk that turns out to be all zeroes is remembered as empty and never asked for again.
 

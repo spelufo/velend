@@ -191,6 +191,8 @@ def _draw():
 		gpu.state.depth_mask_set(False)
 		_shader.bind()
 		_shader.uniform_float('gamma', context.scene.velend.gamma)
+		if context.scene.velend.volumetric_rendering:
+			_shader.uniform_float('tfactor', context.scene.velend.tfactor)
 		for level in bricks.LEVELS:
 			_shader.uniform_sampler('l%dAtlas' % level, Engine.atlases[level].texture)
 			_shader.uniform_sampler('l%dPageTable' % level, Engine.atlases[level].page_texture)

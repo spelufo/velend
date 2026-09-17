@@ -201,7 +201,7 @@ def _sampling_updated(self, context):
 	VolumeSamplerRenderEngine.reload_shaders()
 
 
-def _gamma_updated(self, context):
+def _shading_updated(self, context):
 	VolumeSamplerRenderEngine.request_redraw()
 
 
@@ -687,6 +687,15 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		options=set(),
 		update=_sampling_updated,
 	)
+	tfactor: bpy.props.FloatProperty(
+		name="Transmittance Factor",
+		description="How strongly each bright sample absorbs the ray in volumetric rendering",
+		default=0.5,
+		min=0.0,
+		max=1.0,
+		subtype='FACTOR',
+		update=_shading_updated,
+	)
 	gamma: bpy.props.FloatProperty(
 		name="Gamma",
 		description=(
@@ -697,7 +706,7 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 		min=0.01,
 		soft_max=2.0,
 		precision=3,
-		update=_gamma_updated,
+		update=_shading_updated,
 	)
 	invert_sampling_direction: bpy.props.BoolProperty(
 		name="Invert Sampling Direction",
@@ -827,6 +836,9 @@ class RENDER_PT_velend_sampling(bpy.types.Panel):
 		column.prop(settings, "gamma")
 		column.separator()
 		column.prop(settings, "volumetric_rendering")
+		factor = column.column()
+		factor.enabled = settings.volumetric_rendering
+		factor.prop(settings, "tfactor")
 		column.prop(settings, "invert_sampling_direction")
 		column.prop(settings, "render_depth")
 		column.prop(settings, "render_depth_offset")

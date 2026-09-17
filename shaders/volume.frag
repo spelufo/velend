@@ -146,7 +146,6 @@ void main() {
   // everything behind it, while empty space is transparent. Keeping the final
   // division makes this an absorption-weighted average on the same intensity
   // scale as ordinary rendering.
-  float tfactor = .5;
   float transmittance = 1.0f - tfactor * clamp(firstSample, 0.0f, 1.0f);
 #endif
 #if DEPTH_COLORS
