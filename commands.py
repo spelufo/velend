@@ -754,6 +754,93 @@ def _mesh_grid(mesh):
 	return tifxyz.grid_from_uvs(vertex_uvs, faces)
 
 
+class velend_OT_fill_tifxyz_holes(bpy.types.Operator):
+	bl_idname = "velend.fill_tifxyz_holes"
+	bl_label = "Fill tifxyz Holes"
+	bl_description = "Restore enclosed missing UV-grid quads with smooth 3D interpolation"
+	bl_options = {'REGISTER', 'UNDO'}
+
+	@classmethod
+	def poll(cls, context):
+		obj = context.active_object
+		return obj is not None and obj.type == 'MESH' and obj.mode in {'OBJECT', 'EDIT'}
+
+	def execute(self, context):
+		obj = context.active_object
+		mesh = obj.data
+		editing = obj.mode == 'EDIT'
+		bm = bmesh.from_edit_mesh(mesh) if editing else bmesh.new()
+		if not editing:
+			bm.from_mesh(mesh)
+		try:
+			bm.verts.ensure_lookup_table()
+			bm.verts.index_update()
+			uv_layer = bm.loops.layers.uv.active
+			if uv_layer is None:
+				raise ValueError("the mesh has no active UV map")
+			uvs = np.full((len(bm.verts), 2), np.nan, dtype=np.float64)
+			faces = []
+			for face in bm.faces:
+				faces.append(tuple(loop.vert.index for loop in face.loops))
+				for loop in face.loops:
+					uv = np.asarray(loop[uv_layer].uv, dtype=np.float64)
+					old = uvs[loop.vert.index]
+					if np.isfinite(old).all() and not np.allclose(old, uv, atol=1e-5, rtol=0):
+						raise ValueError("a vertex has different UVs on different faces")
+					uvs[loop.vert.index] = uv
+			grid, fill_cells = tifxyz.enclosed_uv_holes(uvs, faces)
+			if not fill_cells.any():
+				self.report({'INFO'}, "No enclosed tifxyz holes found")
+				return {'CANCELLED'}
+
+			float_layers = []
+			for attribute in mesh.attributes:
+				if (attribute.domain == 'POINT' and attribute.data_type == 'FLOAT'
+						and not attribute.name.startswith(".")
+						and attribute.name not in {"mask", "x", "y", "z"}):
+					layer = bm.verts.layers.float.get(attribute.name)
+					if layer is not None:
+						float_layers.append(layer)
+			values = np.array([
+			list(vert.co) + [float(vert[layer]) for layer in float_layers]
+			for vert in bm.verts
+		], dtype=np.float64)
+			filled = tifxyz.interpolate_hole_grid(grid, fill_cells, values)
+			mapped = {(int(row), int(col)): bm.verts[int(index)]
+				for (row, col), index in np.ndenumerate(grid) if index >= 0}
+			for cell, value in filled.items():
+				vert = bm.verts.new(value[:3])
+				for layer, component in zip(float_layers, value[3:]):
+					vert[layer] = float(component)
+				mapped[cell] = vert
+			finite = uvs[np.isfinite(uvs).all(axis=1)]
+			u_min, v_min = finite.min(axis=0)
+			u_max, v_max = finite.max(axis=0)
+			height, width = grid.shape
+			for row, col in zip(*np.nonzero(fill_cells)):
+				cells = ((row, col), (row + 1, col),
+					(row + 1, col + 1), (row, col + 1))
+				face = bm.faces.new(tuple(mapped[cell] for cell in cells))
+				for loop, (uv_row, uv_col) in zip(face.loops, cells):
+					loop[uv_layer].uv = (
+						u_max - uv_col * (u_max - u_min) / (width - 1),
+						v_min + uv_row * (v_max - v_min) / (height - 1),
+					)
+			if editing:
+				bmesh.update_edit_mesh(mesh, loop_triangles=False)
+			else:
+				bm.to_mesh(mesh)
+				mesh.update()
+			self.report({'INFO'}, "Filled %d tifxyz quads" % fill_cells.sum())
+			return {'FINISHED'}
+		except (TypeError, ValueError) as error:
+			self.report({'ERROR'}, "Could not fill tifxyz holes: %s" % error)
+			return {'CANCELLED'}
+		finally:
+			if not editing:
+				bm.free()
+
+
 def _mesh_export_arrays(mesh, obj, grid):
 	positions = np.empty((len(mesh.vertices), 3), dtype=np.float64)
 	mesh.vertices.foreach_get("co", positions.ravel())
@@ -1121,6 +1208,10 @@ def _object_menu(self, context):
 		self.layout.operator(velend_OT_setup_tifxyz_uv_aspect.bl_idname)
 
 
+def _mesh_menu(self, context):
+	self.layout.operator(velend_OT_fill_tifxyz_holes.bl_idname)
+
+
 def _export_menu(self, context):
 	self.layout.operator(
 		velend_OT_export_tifxyz.bl_idname,
@@ -1151,11 +1242,13 @@ def register():
 	bpy.utils.register_class(velend_OT_setup_scene)
 	bpy.utils.register_class(velend_OT_import_tifxyz)
 	bpy.utils.register_class(velend_OT_setup_tifxyz_uv_aspect)
+	bpy.utils.register_class(velend_OT_fill_tifxyz_holes)
 	bpy.utils.register_class(velend_OT_export_tifxyz)
 	bpy.utils.register_class(velend_OT_import_umbilicus)
 	bpy.utils.register_class(velend_OT_export_umbilicus)
 	bpy.types.VIEW3D_MT_view.append(_view_menu)
 	bpy.types.VIEW3D_MT_object.append(_object_menu)
+	bpy.types.VIEW3D_MT_edit_mesh.append(_mesh_menu)
 	bpy.types.TOPBAR_MT_file_import.append(_import_menu)
 	bpy.types.TOPBAR_MT_file_export.append(_export_menu)
 
@@ -1164,10 +1257,12 @@ def unregister():
 	bpy.types.TOPBAR_MT_file_export.remove(_export_menu)
 	bpy.types.TOPBAR_MT_file_import.remove(_import_menu)
 	bpy.types.VIEW3D_MT_object.remove(_object_menu)
+	bpy.types.VIEW3D_MT_edit_mesh.remove(_mesh_menu)
 	bpy.types.VIEW3D_MT_view.remove(_view_menu)
 	bpy.utils.unregister_class(velend_OT_export_umbilicus)
 	bpy.utils.unregister_class(velend_OT_import_umbilicus)
 	bpy.utils.unregister_class(velend_OT_export_tifxyz)
+	bpy.utils.unregister_class(velend_OT_fill_tifxyz_holes)
 	bpy.utils.unregister_class(velend_OT_setup_tifxyz_uv_aspect)
 	bpy.utils.unregister_class(velend_OT_import_tifxyz)
 	bpy.utils.unregister_class(velend_OT_setup_scene)

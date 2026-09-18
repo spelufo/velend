@@ -256,6 +256,53 @@ class VillaFixtureTest(unittest.TestCase):
 
 
 class UVGridTest(unittest.TestCase):
+	@staticmethod
+	def mesh_with_missing_cells(size, absent, missing_vertices=()):
+		cells = [(row, col) for row in range(size - 1) for col in range(size - 1)
+			if (row, col) not in absent]
+		used = sorted({corner for row, col in cells for corner in (
+			(row, col), (row + 1, col), (row + 1, col + 1), (row, col + 1)
+		)} - set(missing_vertices))
+		indices = {cell: index for index, cell in enumerate(used)}
+		uvs = np.array([(1 - col / (size - 1), row / (size - 1))
+			for row, col in used])
+		faces = [tuple(indices[corner] for corner in (
+			(row, col), (row + 1, col), (row + 1, col + 1), (row, col + 1)
+		)) for row, col in cells]
+		return uvs, faces, used
+
+	def test_fills_only_enclosed_missing_cells(self):
+		uvs, faces, _ = self.mesh_with_missing_cells(5, {(0, 0), (2, 2)})
+		grid, fill = tifxyz.enclosed_uv_holes(uvs, faces)
+		self.assertEqual(grid.shape, (5, 5))
+		self.assertEqual(set(zip(*np.nonzero(fill))), {(2, 2)})
+
+	def test_leaves_notch_connected_to_outer_boundary(self):
+		uvs, faces, _ = self.mesh_with_missing_cells(5, {(0, 2), (1, 2), (2, 2)})
+		_, fill = tifxyz.enclosed_uv_holes(uvs, faces)
+		self.assertFalse(fill.any())
+
+	def test_interpolates_a_missing_vertex_and_float_channel(self):
+		absent = {(row, col) for row in (1, 2) for col in (1, 2)}
+		uvs, faces, used = self.mesh_with_missing_cells(5, absent, {(2, 2)})
+		grid, fill = tifxyz.enclosed_uv_holes(uvs, faces)
+		values = np.array([[row, col, row + col, 2 * row - col]
+			for row, col in used], dtype=float)
+		result = tifxyz.interpolate_hole_grid(grid, fill, values)
+		self.assertEqual(set(zip(*np.nonzero(fill))), absent)
+		self.assertEqual(list(result), [(2, 2)])
+		np.testing.assert_allclose(result[(2, 2)], [2, 2, 4, 2], atol=1e-7)
+
+	def test_face_only_hole_needs_no_new_vertices(self):
+		uvs, faces, _ = self.mesh_with_missing_cells(5, {(2, 2)})
+		grid, fill = tifxyz.enclosed_uv_holes(uvs, faces)
+		self.assertEqual(tifxyz.interpolate_hole_grid(grid, fill, np.zeros((len(uvs), 3))), {})
+
+	def test_hole_fill_rejects_non_grid_faces(self):
+		uvs = np.array([[0, 0], [1, 0], [0.9, 1], [0, 1]], dtype=float)
+		with self.assertRaises(tifxyz.UVGridError):
+			tifxyz.enclosed_uv_holes(uvs, [(0, 1, 2, 3)])
+
 	def test_orders_a_grid_by_descending_u_and_ascending_v(self):
 		uvs = np.array([
 			[1, 0], [0, 1], [1, 1], [0, 0], [0.5, 1], [0.5, 0],

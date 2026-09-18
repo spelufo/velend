@@ -403,6 +403,109 @@ def partial_grid_from_uvs(vertex_uvs, faces, tolerance=1e-5):
 	return grid
 
 
+def enclosed_uv_holes(vertex_uvs, faces):
+	"""Return the vertex grid and missing quad cells enclosed by existing faces."""
+	grid = partial_grid_from_uvs(vertex_uvs, faces)
+	height, width = grid.shape
+	vertex_cells = {
+		int(vertex): (int(row), int(col))
+		for (row, col), vertex in np.ndenumerate(grid) if vertex >= 0
+	}
+	present = np.zeros((height - 1, width - 1), dtype=bool)
+	for face in faces:
+		row, col = min(vertex_cells[vertex] for vertex in face)
+		present[row, col] = True
+	missing = ~present
+	exterior = np.zeros_like(missing)
+	stack = [(int(row), int(col)) for row, col in zip(*np.nonzero(missing))
+		if row in (0, height - 2) or col in (0, width - 2)]
+	while stack:
+		row, col = stack.pop()
+		if exterior[row, col]:
+			continue
+		exterior[row, col] = True
+		for next_row, next_col in ((row - 1, col), (row + 1, col),
+				(row, col - 1), (row, col + 1)):
+			if (0 <= next_row < height - 1 and 0 <= next_col < width - 1
+					and missing[next_row, next_col] and not exterior[next_row, next_col]):
+				stack.append((next_row, next_col))
+	return grid, missing & ~exterior
+
+
+def interpolate_hole_grid(grid, fill_cells, values):
+	"""Harmonically interpolate values at new vertices of the requested quads.
+
+	Known grid vertices are fixed. Only edges of the new quads participate, so
+	open boundaries outside a repaired hole cannot pull the solution away.
+	Returns a map from (row, column) to interpolated vectors.
+	"""
+	values = np.asarray(values, dtype=np.float64)
+	if values.ndim == 1:
+		values = values[:, None]
+	corners = set()
+	edges = set()
+	for row, col in zip(*np.nonzero(fill_cells)):
+		corners.update(((row, col), (row + 1, col), (row + 1, col + 1), (row, col + 1)))
+		edges.update((tuple(sorted(pair)) for pair in (
+			((row, col), (row + 1, col)),
+			((row + 1, col), (row + 1, col + 1)),
+			((row + 1, col + 1), (row, col + 1)),
+			((row, col + 1), (row, col)),
+		)))
+	unknown = sorted(cell for cell in corners if grid[cell] < 0)
+	if not unknown:
+		return {}
+	indices = {cell: index for index, cell in enumerate(unknown)}
+	degree = np.zeros(len(unknown), dtype=np.float64)
+	right = np.zeros((len(unknown), values.shape[1]), dtype=np.float64)
+	links = []
+	for first, second in edges:
+		for cell, neighbor in ((first, second), (second, first)):
+			index = indices.get(cell)
+			if index is None:
+				continue
+			degree[index] += 1
+			other = indices.get(neighbor)
+			if other is None:
+				right[index] += values[grid[neighbor]]
+			else:
+				links.append((index, other))
+	if (degree == 0).any():
+		raise ValueError("a hole vertex has no grid neighbors")
+	links = np.asarray(links, dtype=np.intp).reshape(-1, 2)
+
+	def multiply(vector):
+		result = degree[:, None] * vector
+		if len(links):
+			np.add.at(result, links[:, 0], -vector[links[:, 1]])
+		return result
+
+	# Conjugate gradients solves all coordinate/attribute channels at once.
+	solution = np.zeros_like(right)
+	residual = right.copy()
+	direction = residual.copy()
+	squared = (residual * residual).sum(axis=0)
+	limits = np.maximum(squared, 1.0) * 1e-20
+	for _ in range(min(max(4 * len(unknown), 32), 10000)):
+		if (squared <= limits).all():
+			break
+		product = multiply(direction)
+		denominator = (direction * product).sum(axis=0)
+		active = squared > limits
+		if (denominator[active] <= 0).any():
+			raise ValueError("hole interpolation has no fixed boundary")
+		step = np.divide(squared, denominator, out=np.zeros_like(squared), where=active)
+		solution += direction * step
+		residual -= product * step
+		next_squared = (residual * residual).sum(axis=0)
+		beta = np.divide(next_squared, squared, out=np.zeros_like(squared), where=active)
+		direction = residual + direction * beta
+		squared = next_squared
+	else:
+		raise ValueError("hole interpolation did not converge")
+	return dict(zip(unknown, solution))
+
+
 def scatter_grid(values, grid, fill):
 	"""Place existing vertex values in a full grid and fill missing samples."""
 	values = np.asarray(values)
