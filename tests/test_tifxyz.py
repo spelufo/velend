@@ -146,9 +146,20 @@ class SurfaceArraysTest(unittest.TestCase):
 		self.assertEqual(positions[0].tolist(), [100.0, 200.0, 300.0])
 		self.assertEqual(positions[-1].tolist(), [103.0, 202.0, 300.0])
 		self.assertEqual(values["generations"].tolist(), list(range(12)))
-		# U runs opposite the columns and V runs along the tifxyz rows.
-		self.assertEqual(uvs[0].tolist(), [1.0, 0.0])
-		self.assertEqual(uvs[-1].tolist(), [0.0, 1.0])
+		# U and V run opposite the tifxyz's rightward columns and down-screen rows.
+		self.assertEqual(uvs[0].tolist(), [1.0, 1.0])
+		self.assertEqual(uvs[-1].tolist(), [0.0, 0.0])
+
+	def test_uv_grid_round_trip_preserves_tiff_order(self):
+		x, y, z = grid(3, 4)
+		valid = np.ones((3, 4), dtype=bool)
+		positions, quads, uvs, _ = tifxyz.surface_arrays(x, y, z, valid, {})
+		indices = tifxyz.grid_from_uvs(uvs, quads)
+		self.assertEqual(indices.tolist(), np.arange(12).reshape(3, 4).tolist())
+		self.assertTrue(np.array_equal(
+			tifxyz.scatter_grid(positions, indices, (-1, -1, -1)),
+			np.stack((x, y, z), axis=2),
+		))
 
 
 def write_surface(directory, x, y, z, mask=None, channels=None, meta=None):
@@ -264,7 +275,7 @@ class UVGridTest(unittest.TestCase):
 			(row, col), (row + 1, col), (row + 1, col + 1), (row, col + 1)
 		)} - set(missing_vertices))
 		indices = {cell: index for index, cell in enumerate(used)}
-		uvs = np.array([(1 - col / (size - 1), row / (size - 1))
+		uvs = np.array([(1 - col / (size - 1), 1 - row / (size - 1))
 			for row, col in used])
 		faces = [tuple(indices[corner] for corner in (
 			(row, col), (row + 1, col), (row + 1, col + 1), (row, col + 1)
@@ -303,13 +314,13 @@ class UVGridTest(unittest.TestCase):
 		with self.assertRaises(tifxyz.UVGridError):
 			tifxyz.enclosed_uv_holes(uvs, [(0, 1, 2, 3)])
 
-	def test_orders_a_grid_by_descending_u_and_ascending_v(self):
+	def test_orders_a_grid_by_descending_u_and_v(self):
 		uvs = np.array([
 			[1, 0], [0, 1], [1, 1], [0, 0], [0.5, 1], [0.5, 0],
 		], dtype=float)
 		faces = [(1, 4, 5, 3), (4, 2, 0, 5)]
 		grid_indices = tifxyz.grid_from_uvs(uvs, faces)
-		self.assertEqual(grid_indices.tolist(), [[0, 5, 3], [2, 4, 1]])
+		self.assertEqual(grid_indices.tolist(), [[2, 4, 1], [0, 5, 3]])
 
 	def test_rejects_a_missing_quad(self):
 		uvs = np.array([[0, 1], [1, 1], [0, 0], [1, 0]], dtype=float)
@@ -319,7 +330,7 @@ class UVGridTest(unittest.TestCase):
 	def test_crops_to_the_remaining_uv_bounds(self):
 		uvs = np.array([[0.2, 0.8], [0.5, 0.8], [0.2, 0.4], [0.5, 0.4]])
 		partial = tifxyz.partial_grid_from_uvs(uvs, [(0, 1, 3, 2)])
-		self.assertEqual(partial.tolist(), [[3, 2], [1, 0]])
+		self.assertEqual(partial.tolist(), [[1, 0], [3, 2]])
 
 	def test_keeps_holes_inside_the_uv_crop(self):
 		uvs = np.array([
@@ -330,7 +341,7 @@ class UVGridTest(unittest.TestCase):
 			uvs, [(0, 1, 5, 4), (2, 3, 7, 6)]
 		)
 		self.assertEqual(partial.tolist(), [
-			[7, 6, -1, 5, 4], [3, 2, -1, 1, 0],
+			[3, 2, -1, 1, 0], [7, 6, -1, 5, 4],
 		])
 
 	def test_ignores_orphan_vertices_without_uv_loops(self):
@@ -338,7 +349,7 @@ class UVGridTest(unittest.TestCase):
 			[0, 1], [0.5, 1], [0, 0], [0.5, 0], [np.nan, np.nan],
 		])
 		partial = tifxyz.partial_grid_from_uvs(uvs, [(0, 1, 3, 2)])
-		self.assertEqual(partial.tolist(), [[3, 2], [1, 0]])
+		self.assertEqual(partial.tolist(), [[1, 0], [3, 2]])
 
 	def test_reports_the_face_and_edge_that_do_not_follow_the_grid(self):
 		uvs = np.array([[0, 0], [1, 0], [0.9, 1], [0, 1]], dtype=float)

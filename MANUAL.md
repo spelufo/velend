@@ -14,6 +14,13 @@ File > Import > Volume Cartographer Surface (tifxyz) brings a segmentation in as
 
 The surface's coordinate grid becomes a quad mesh with a UV map. A transparent placeholder image on its material gives Blender's UV Editor the grid's aspect ratio without loading another full-size image. For surfaces imported with an older Velend version, select them and run Object > Set Up tifxyz UV Aspect, also available from F3 search. The command infers the dimensions from the UV lattice, just as export does, and does not require import metadata. Its `mask.tif` decides which grid vertices and faces are created; it is not retained as a mesh attribute. To change the mask, delete vertices or faces from the mesh.
 
+Velend flips both tifxyz grid axes in the UV map. It flips V because Blender's V
+increases upward, while Volume Cartographer's tifxyz V follows image rows downward. It
+flips U because spiral-fitting writes increasing theta from left to right, opposite the
+reading direction: text is read left to right from the outside toward the inside of the
+scroll, in decreasing theta. Export reverses both flips, so an unchanged surface round
+trips without changing its tifxyz grid order.
+
 To repair an accidental hole, select the mesh and run Mesh > Fill tifxyz Holes in Edit Mode, or search for the same command with F3 in either Edit or Object Mode. It restores enclosed missing UV-grid quads and smoothly interpolates missing 3D positions and float point attributes. Existing vertices stay fixed; open edges and gaps reaching the outer UV boundary are left alone. The command is undoable.
 
 File > Export > Volume Cartographer Surface exports a quad mesh whose surviving face vertices lie on a rectangular UV lattice. It crops to their smallest UV rectangle, writes holes inside it with mask 0 and invalid coordinates, and ignores orphan vertices that have no UV face corners. Object transforms are included. Apply or remove modifiers before exporting. Imported metadata and placement are reused, while a new mesh starts with editable UUID, grid scale, and voxel-size defaults. Public FLOAT point attributes become extra TIFF channels.

@@ -35,7 +35,7 @@ def make_mesh():
 		for loop_index in polygon.loop_indices:
 			index = mesh.loops[loop_index].vertex_index
 			row, col = divmod(index, 5)
-			layer.data[loop_index].uv = (1 - col / 4, row / 4)
+			layer.data[loop_index].uv = (1 - col / 4, 1 - row / 4)
 	attribute = mesh.attributes.new('score', 'FLOAT', 'POINT')
 	for index, point in enumerate(attribute.data):
 		row, col = divmod(index, 5)

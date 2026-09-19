@@ -1,5 +1,8 @@
 # v0.6.0 (main, unreleased)
 
+- Tifxyz UV maps now flip both axes on import; export reverses those mappings
+  so tifxyz files retain their original row and column order across round trips.
+
 # v0.5.0
 
 - Tifxyz and umbilicus imports now default to coordinates in the scene's

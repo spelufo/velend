@@ -230,7 +230,7 @@ def surface_arrays(x, y, z, valid, channels):
 	height, width = valid.shape
 	uvs = np.empty((len(rows), 2), dtype=np.float32)
 	uvs[:, 0] = 1.0 - cols / max(width - 1, 1)
-	uvs[:, 1] = rows / max(height - 1, 1)
+	uvs[:, 1] = 1.0 - rows / max(height - 1, 1)
 	values = {name: channel[used] for name, channel in channels.items()}
 	return positions, quads, uvs, values
 
@@ -283,11 +283,12 @@ def grid_from_uvs(vertex_uvs, faces, tolerance=1e-5):
 	if uvs.ndim != 2 or uvs.shape[1] != 2 or len(uvs) < 4:
 		raise ValueError("the active UV map does not define a grid")
 	u_levels, right_cols = _levels(uvs[:, 0], tolerance)
-	v_levels, rows = _levels(uvs[:, 1], tolerance)
+	v_levels, bottom_rows = _levels(uvs[:, 1], tolerance)
 	height, width = len(v_levels), len(u_levels)
 	if height < 2 or width < 2 or height * width != len(uvs):
 		raise ValueError("UV vertices do not form a complete rectangular lattice")
 	cols = width - 1 - right_cols
+	rows = height - 1 - bottom_rows
 	grid = np.full((height, width), -1, dtype=np.int32)
 	for vertex, (row, col) in enumerate(zip(rows, cols)):
 		if grid[row, col] != -1:
@@ -363,7 +364,7 @@ def partial_grid_from_uvs(vertex_uvs, faces, tolerance=1e-5):
 
 	vertices = np.flatnonzero(mapped)
 	cols_float = (u_max - uvs[vertices, 0]) / u_step
-	rows_float = (uvs[vertices, 1] - v_min) / v_step
+	rows_float = (v_max - uvs[vertices, 1]) / v_step
 	cols = np.rint(cols_float).astype(np.int32)
 	rows = np.rint(rows_float).astype(np.int32)
 	# Blender stores UVs as float32. Allow their error to grow slightly when

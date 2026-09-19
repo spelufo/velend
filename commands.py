@@ -824,7 +824,7 @@ class velend_OT_fill_tifxyz_holes(bpy.types.Operator):
 				for loop, (uv_row, uv_col) in zip(face.loops, cells):
 					loop[uv_layer].uv = (
 						u_max - uv_col * (u_max - u_min) / (width - 1),
-						v_min + uv_row * (v_max - v_min) / (height - 1),
+						v_max - uv_row * (v_max - v_min) / (height - 1),
 					)
 			if editing:
 				bmesh.update_edit_mesh(mesh, loop_triangles=False)
