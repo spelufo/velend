@@ -151,13 +151,25 @@ with tempfile.TemporaryDirectory() as tmp:
         tifxyz.read_page(scene_export / (axis + '.tif')) for axis in 'xyz'
     ], axis=-1)
     assert np.allclose(exported, surface_points), exported
+
+    # Export can instead express the same unchanged geometry in the volume
+    # currently being rendered, bypassing the placement retained at import.
+    current_export = root / 'current-export'
+    assert bpy.ops.velend.export_tifxyz(
+        filepath=str(current_export), use_current_volume_coordinates=True
+    ) == {'FINISHED'}
+    exported = np.stack([
+        tifxyz.read_page(current_export / (axis + '.tif')) for axis in 'xyz'
+    ], axis=-1)
+    expected = surface_points @ M[:3, :3].T + M[:3, 3]
+    assert np.allclose(exported, expected), exported
     bpy.data.objects.remove(surface, do_unlink=True)
 
     # The explicit alternative retains the old behavior: points are B voxels
     # and are transformed back into the frame of A for storage in the scene.
     assert bpy.ops.velend.import_tifxyz(
         directory=str(surface_dir), voxel_size=7.910,
-        coordinate_space='RENDERED') == {'FINISHED'}
+        use_current_volume_coordinates=True) == {'FINISHED'}
     surface = bpy.context.active_object
     surface_world = np.array(surface.data.vertices[0].co)
     assert np.allclose(E.to_voxels(surface_world), surface_points[0, 0]), surface_world
