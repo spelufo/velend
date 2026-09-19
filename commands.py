@@ -896,6 +896,14 @@ class velend_OT_export_tifxyz(bpy.types.Operator):
 	scale_x: bpy.props.FloatProperty(name="Grid Scale X", default=1.0, min=1e-9)
 	scale_y: bpy.props.FloatProperty(name="Grid Scale Y", default=1.0, min=1e-9)
 	voxel_size: bpy.props.FloatProperty(name="Voxel Size", default=9.362, min=1e-9)
+	use_current_volume_coordinates: bpy.props.BoolProperty(
+		name="Use Current Volume Coordinates",
+		description=(
+			"Export coordinates in the currently rendered volume instead of the "
+			"surface's original coordinate space"
+		),
+		default=False,
+	)
 	overwrite: bpy.props.BoolProperty(
 		name="Replace Existing tifxyz Files",
 		description="Replace metadata and TIFF channels already in the chosen directory",
@@ -912,11 +920,15 @@ class velend_OT_export_tifxyz(bpy.types.Operator):
 		row = layout.row(align=True)
 		row.prop(self, "scale_x")
 		row.prop(self, "scale_y")
-		layout.prop(self, "voxel_size")
+		layout.prop(self, "use_current_volume_coordinates")
+		row = layout.row()
+		row.enabled = not self.use_current_volume_coordinates
+		row.prop(self, "voxel_size")
 		layout.prop(self, "overwrite")
 
 	def _defaults(self, context):
 		obj = context.active_object
+		self.use_current_volume_coordinates = False
 		self.uuid = str(obj.get("velend_tifxyz_uuid", obj.name))
 		step = max(1, int(obj.get("velend_tifxyz_step", 1)))
 		scale = obj.get("velend_tifxyz_scale", (1.0, 1.0))
@@ -956,11 +968,16 @@ class velend_OT_export_tifxyz(bpy.types.Operator):
 		mesh = obj.data
 		try:
 			missing = None
-			stored = obj.get("velend_tifxyz_placement")
-			placement = (
-				np.asarray(stored, dtype=np.float64).reshape(4, 4)
-				if stored is not None else _placement(context, self.voxel_size).matrix
-			)
+			if self.use_current_volume_coordinates:
+				placement = _placement(
+					context, _coordinate_voxel_size(context, 'RENDERED'), 'RENDERED'
+				).matrix
+			else:
+				stored = obj.get("velend_tifxyz_placement")
+				placement = (
+					np.asarray(stored, dtype=np.float64).reshape(4, 4)
+					if stored is not None else _placement(context, self.voxel_size).matrix
+				)
 			try:
 				grid = _mesh_grid(mesh)
 				points, mask, channels = _mesh_export_arrays(mesh, obj, grid)

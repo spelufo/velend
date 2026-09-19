@@ -25,6 +25,11 @@ To repair an accidental hole, select the mesh and run Mesh > Fill tifxyz Holes i
 
 File > Export > Volume Cartographer Surface exports a quad mesh whose surviving face vertices lie on a rectangular UV lattice. It crops to their smallest UV rectangle, writes holes inside it with mask 0 and invalid coordinates, and ignores orphan vertices that have no UV face corners. Object transforms are included. Apply or remove modifiers before exporting. Imported metadata and placement are reused, while a new mesh starts with editable UUID, grid scale, and voxel-size defaults. Public FLOAT point attributes become extra TIFF channels.
 
+Enable "Use Current Volume Coordinates" to export the geometry in the voxel coordinates of the
+volume currently being rendered. This uses its registration with the scene volume when one exists;
+otherwise the volumes are taken to share an origin and axes. It is off by default, preserving an
+imported surface's original coordinate space.
+
 Raise "Step" to bring a large segment in coarser, one grid point in every n. "Coordinates" says whether the tifxyz is in the scene volume's voxels or the volume currently being rendered. It starts at Scene Volume, so surfaces traced in the scan the scene was set up against stay in that frame after switching scans. Choose Rendered Volume for a surface traced in the currently rendered scan. "Voxel Size" starts from the chosen volume and can be corrected independently.
 
 

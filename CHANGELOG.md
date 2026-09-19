@@ -1,5 +1,7 @@
 # v0.6.0 (main, unreleased)
 
+- Tifxyz export can optionally write coordinates in the volume currently being
+  rendered, applying its registration with the scene volume.
 - Tifxyz UV maps now flip both axes on import; export reverses those mappings
   so tifxyz files retain their original row and column order across round trips.
 
