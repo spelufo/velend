@@ -46,6 +46,11 @@ Then hit "Setup Scene for Volume", which waits for loading and sets the rest up:
 - Viewport Overlays > Grid > Scale: 0.001
 
 It also adds a plane per axis through the middle of the volume, and puts the 3D cursor there, which is where bricks stream in around.
+The scan is oriented with its physical top at high Z and kept in the positive XYZ octant. The
+orientation checkboxes come from the open data metadata when available and remain editable.
+
+The View tab of the 3D Viewport's N-panel shows the cursor in original-volume voxels. After switching
+to another volume, it also shows the cursor in that volume's voxels.
 
 Hit "space" to search for commands and search for "Frame selected".
 Hit "z" and choose "Rendered" to show the scroll scan on the cutting planes.

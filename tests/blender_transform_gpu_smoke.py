@@ -52,6 +52,7 @@ for i in range(6):
     array[:] = np.broadcast_to(51 + x_ramp + z_ramp, (SIZE, SIZE, SIZE))
 bpy.context.scene.unit_settings.scale_length = 1.0
 bpy.context.scene.velend.resolution = VOXEL_SIZE_UM
+bpy.context.scene.velend.z_direction_is_top_to_bottom = False
 bpy.context.scene.velend.num_samples = 2
 bpy.context.scene.velend.render_depth = 8 * VOXEL_SIZE_UM
 bpy.context.scene.velend.volumetric_rendering = False

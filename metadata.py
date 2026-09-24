@@ -101,6 +101,17 @@ class Volume:
 		self.energy_keV = properties.get("energy_keV")
 		self.pixel_size_um = properties.get("pixel_size_um")
 		self.data_format = properties.get("data_format")
+		# These describe the voxel axes relative to the physical object. Treat
+		# anything but JSON booleans as absent: bool("false") would be a
+		# particularly dangerous interpretation here.
+		left_handed = properties.get("left_handed_coordinates")
+		z_top_to_bottom = properties.get("z_direction_is_top_to_bottom")
+		self.left_handed_coordinates = (
+			left_handed if isinstance(left_handed, bool) else None
+		)
+		self.z_direction_is_top_to_bottom = (
+			z_top_to_bottom if isinstance(z_top_to_bottom, bool) else None
+		)
 		# The manifest writes the shape the way zarr indexes it, (Z, Y, X).
 		shape = properties.get("shape")
 		self.shape = tuple(shape) if shape else None
@@ -252,6 +263,30 @@ def source_volume_for(scene_volume_id, source_url="", volume_path=""):
 	if scene_volume_id and scene_volume_id != volume_id_for(source_url, volume_path):
 		return scene_volume_id
 	return source_url.strip() or volume_path.strip() or scene_volume_id
+
+
+def volume_orientation(shape_xyz, left_handed, z_top_to_bottom):
+	"""The affine taking raw volume voxels into the real-world axis convention.
+
+	X is kept positive. Z is reversed when the stack runs from top to bottom,
+	and Y is reversed when necessary to preserve the volume's stated handedness
+	in Blender's right-handed coordinates. Reflected axes are translated by the
+	full volume extent so the bounding box remains in the positive octant.
+	"""
+	shape = np.asarray(shape_xyz, dtype=np.float64)
+	if shape.shape != (3,) or not np.isfinite(shape).all() or (shape < 0).any():
+		raise ValueError("volume shape must be three non-negative finite values")
+	z_sign = -1.0 if z_top_to_bottom else 1.0
+	determinant = -1.0 if left_handed else 1.0
+	y_sign = determinant * z_sign
+	matrix = np.eye(4, dtype=np.float64)
+	matrix[1, 1] = y_sign
+	matrix[2, 2] = z_sign
+	if y_sign < 0:
+		matrix[1, 3] = shape[1]
+	if z_sign < 0:
+		matrix[2, 3] = shape[2]
+	return matrix
 
 
 def _affine(rows):

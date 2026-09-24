@@ -54,12 +54,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	shape_xyz = None
 	# The affine taking a Blender world point into the loaded volume's level 0
-	# voxels, set up by `ensure_grid`. The scene's coordinates are metric -- a
-	# Blender unit is `scale_length` metres -- and sit in the frame of the volume
-	# the scene was set up against, which `ui` names and states the voxel size
-	# of. `compute_world_to_voxels` is the three steps between the two: the
-	# scene's units into micrometers, the registration onto the volume being
-	# rendered, and that volume's own voxel size.
+	# voxels, set up by `ensure_grid`. The scene's coordinates are metric and use
+	# the real-world orientation chosen for the original scene volume.
 	world_to_voxels = np.eye(4)
 
 	# Brick streaming. Residency and loader state are CPU only so the operator
@@ -170,9 +166,35 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		return 1000000.0 * bpy.context.scene.unit_settings.scale_length
 
 	@classmethod
+	def current_volume_id(cls):
+		"""The catalogue id named by the volume currently being rendered."""
+		settings = cls.settings()
+		return metadata.volume_id_for(settings.source_url, settings.volume_path)
+
+	@classmethod
+	def scene_from_voxels(cls, voxel_size=None):
+		"""Raw scene-volume voxels into oriented Blender world coordinates.
+
+		`voxel_size` lets importers place coordinates whose stated physical size
+		differs from the scene volume's saved size while retaining its axes and
+		origin convention.
+		"""
+		settings = cls.settings()
+		matrix = metadata.volume_orientation(
+			settings.scene_shape_xyz,
+			settings.left_handed_coordinates,
+			settings.z_direction_is_top_to_bottom,
+		)
+		size = voxel_size or settings.scene_resolution or settings.resolution or 1.0
+		matrix[:3] *= size / cls.um_per_unit()
+		return matrix
+
+	@classmethod
 	def physical_transform(cls):
-		"""The affine taking a point in the frame the scene's coordinates are in
-		onto the volume being rendered, both frames in micrometers.
+		"""The affine from the raw scene-volume frame to the rendered volume.
+
+		Both frames here are in micrometers. The scene's real-world orientation
+		is deliberately separate and is composed by `compute_world_to_voxels`.
 
 		The metadata registers a sample's volumes pairwise in each other's
 		voxels, so the matrix for the pair is conjugated by the two voxel sizes
@@ -205,14 +227,22 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 
 	@classmethod
 	def compute_world_to_voxels(cls):
-		"""The affine a world point reaches the loaded volume's level 0 voxels
-		through: the scene's units into micrometers, the registration above, and
-		then the voxel size of the volume being rendered."""
-		resolution = cls.settings().resolution or 1.0
-		matrix = cls.physical_transform()
-		matrix[:3, :3] *= cls.um_per_unit() / resolution
-		matrix[:3, 3] /= resolution
-		return matrix
+		"""Blender world coordinates into the loaded volume's level 0 voxels."""
+		settings = cls.settings()
+		try:
+			world_to_scene = np.linalg.inv(cls.scene_from_voxels())
+		except np.linalg.LinAlgError:
+			return np.eye(4)
+		registration = metadata.volume_transform(
+			settings.scene_volume_id, cls.current_volume_id()
+		)
+		if registration is None:
+			# With no registration, retain the existing assumption that the two
+			# physical frames share an origin and axes.
+			scene_um = settings.scene_resolution or settings.resolution or 1.0
+			loaded_um = settings.resolution or scene_um
+			registration = np.diag([scene_um / loaded_um] * 3 + [1.0])
+		return registration @ world_to_scene
 
 	@classmethod
 	def compute_world_from_voxels(cls):

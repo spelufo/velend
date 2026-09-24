@@ -34,9 +34,21 @@ def manifest():
                 {'to_volume_id': B, 'matrix': MATRIX}]}]}},
         'scans': {},
         'volumes': {
-            A: {'id': A, 'long_id': A + '-3.240um.zarr'},
-            B: {'id': B, 'long_id': B + '-7.910um.zarr'},
-            C: {'id': C, 'long_id': C + '-2.000um.zarr'},
+            A: {'id': A, 'long_id': A + '-3.240um.zarr', 'properties': {
+                'left_handed_coordinates': False,
+                'z_direction_is_top_to_bottom': False,
+                'shape': [4, 4, 4],
+            }},
+            B: {'id': B, 'long_id': B + '-7.910um.zarr', 'properties': {
+                'left_handed_coordinates': False,
+                'z_direction_is_top_to_bottom': False,
+                'shape': [8, 8, 8],
+            }},
+            C: {'id': C, 'long_id': C + '-2.000um.zarr', 'properties': {
+                'left_handed_coordinates': False,
+                'z_direction_is_top_to_bottom': False,
+                'shape': [4, 4, 4],
+            }},
         },
         'segments': {},
     }}}

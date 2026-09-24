@@ -8,9 +8,10 @@ import os
 if os.environ.get('VELEND_TEST_DEPS'):
     sys.path.insert(0, os.environ['VELEND_TEST_DEPS'])
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-import bpy, tempfile, time, zarr
+import bpy, numpy as np, tempfile, time, zarr
 from pathlib import Path
 import velend
+from velend import ui
 from velend.renderer import VolumeSamplerRenderEngine as E
 # Register modules directly to avoid downloading the catalogue.
 for mod in velend._modules:
@@ -24,6 +25,10 @@ with tempfile.TemporaryDirectory() as tmp:
         a = group.create_array(str(i), shape=(4,4,4), chunks=(2,2,2), dtype='u1')
         a[:] = 80
     bpy.context.scene.velend.volume_path = str(root)
+    settings = bpy.context.scene.velend
+    assert settings.left_handed_coordinates is False
+    assert settings.z_direction_is_top_to_bottom is True
+    assert len(ui.orientation_metadata_missing(settings)) == 2
     assert E.get_volume() is None
     deadline = time.monotonic()+10
     while E.get_volume() is None:
@@ -31,6 +36,10 @@ with tempfile.TemporaryDirectory() as tmp:
         time.sleep(.01)
     assert len(E.pyramid) == 6
     assert bpy.ops.velend.setup_scene() == {'FINISHED'}
+    assert tuple(settings.scene_shape_xyz) == (4, 4, 4)
+    low, high = E.world_bounds()
+    np.testing.assert_allclose(low, [0.0, 0.0, 0.0], atol=1e-8)
+    assert (high > 0.0).all(), high
     assert bpy.data.objects.get('Cut X')
     assert tuple(bpy.context.scene.cursor.location) != (0,0,0)
     bpy.context.scene.velend.source_url = 'http://127.0.0.1:1'

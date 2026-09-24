@@ -77,6 +77,27 @@ Voxel Size is read rather than set: it comes from the metadata for a volume the 
 A transform that has not reached the published metadata yet can be supplied through Preferences > Add-ons > velend > Extra Metadata, a JSON file shaped like `metadata.json` and merged over it. A direction it leaves out is taken from the opposite one inverted.
 
 
+## Scan orientation and cursor coordinates
+
+The scene volume is placed in Blender with the physical top of the scroll at high Z and its bounding
+box in the positive XYZ octant. **Left Handed Coordinates** and **Z Direction Is Top to Bottom** in
+the Scene > Velend panel state how the raw voxel axes relate to the object. Velend reads each flag
+from the open data metadata when it is available. A missing flag defaults to off and on respectively,
+shows a warning, and remains editable.
+
+X always remains positive. A right-handed bottom-to-top volume needs no orientation transform. A
+right-handed top-to-bottom volume flips Y and Z; a left-handed bottom-to-top volume flips Y; and a
+left-handed top-to-bottom volume flips Z. Each flipped axis is translated by the volume's full extent,
+so no part of its bounding box moves into negative coordinates. Set these flags before importing or
+editing volume-space geometry.
+
+View > 3D Cursor in the 3D Viewport's N-panel includes an editable **Original Volume (voxels)** XYZ
+position. It is the cursor position in the scene volume's raw full-resolution voxel coordinates. When
+another volume is being rendered, **Current Volume (voxels)** shows the same position through the
+registration or fallback placement into that volume. Editing either vector moves Blender's one 3D
+cursor and updates the other representation.
+
+
 ## Rendering
 
 The Volume Sampler engine shades the meshes already in the scene with the scan. Every fragment looks the volume up where its surface sits, averaging a few samples along the face normal to thin out the noise the sheets are embedded in, so a plane through the volume comes out a slice of it and an imported segment comes out the sheet it was traced from. Where nothing is loaded the fragment is dropped rather than painted, which is what a mesh you can see through means.

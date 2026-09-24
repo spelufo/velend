@@ -357,8 +357,14 @@ class velend_OT_setup_scene(bpy.types.Operator):
 		scene.render.engine = engine.bl_idname
 		_setup_viewports(context)
 
-		engine.world_to_voxels = engine.compute_world_to_voxels()
 		engine.ensure_grid()
+		# The loaded zarr is authoritative for the scene frame's dimensions. A
+		# later registered-volume switch keeps the original shape saved here and
+		# takes any missing one from the catalogue instead.
+		current_id = engine.current_volume_id()
+		shape = engine.shape_xyz if current_id == scene.velend.scene_volume_id else None
+		ui.refresh_scene_orientation(scene.velend, shape)
+		engine.world_to_voxels = engine.compute_world_to_voxels()
 		# The volume's own box, in the scene's coordinates: those of the volume
 		# it was set up against, which is this one unless it is being rendered
 		# through the transform registered between the two.
@@ -383,9 +389,12 @@ class velend_OT_setup_scene(bpy.types.Operator):
 		# would fill the atlases from one corner of the volume.
 		scene.cursor.location = center
 		engine.rescale()
-		self.report(
-			{'INFO'}, "Scene set up for a %.1f x %.1f x %.1f mm volume" % tuple(extents)
-		)
+		message = "Scene set up for a %.1f x %.1f x %.1f mm volume" % tuple(extents)
+		missing = ui.orientation_metadata_missing(scene.velend)
+		if missing:
+			self.report({'WARNING'}, "%s; orientation metadata is incomplete" % message)
+		else:
+			self.report({'INFO'}, message)
 		return {'FINISHED'}
 
 
@@ -429,8 +438,7 @@ def _placement(context, voxel_size, coordinate_space='RENDERED'):
 	scene's coordinates to it, through any transform registered for the pair.
 	"""
 	if coordinate_space == 'SCENE':
-		placement = np.eye(4, dtype=np.float64)
-		placement[:3, :3] *= voxel_size / VolumeSamplerRenderEngine.um_per_unit()
+		placement = VolumeSamplerRenderEngine.scene_from_voxels(voxel_size)
 	else:
 		matrix = VolumeSamplerRenderEngine.compute_world_from_voxels()
 		scale = voxel_size / (context.scene.velend.resolution or voxel_size)

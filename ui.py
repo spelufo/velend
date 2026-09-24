@@ -12,6 +12,7 @@ import shlex
 import subprocess
 
 import bpy
+import numpy as np
 
 from . import metadata
 from . import mirror
@@ -41,6 +42,7 @@ def resolution_from_path(path):
 # handed.
 _pending_ask = None
 _last_cache_usage = None
+_setting_orientation = False
 
 
 def _watch_cache_usage():
@@ -92,6 +94,62 @@ def _anchored(settings):
 	return settings.scene_volume_id == metadata.volume_id_for(
 		settings.source_url, settings.volume_path
 	)
+
+
+def orientation_metadata_missing(settings):
+	"""Names of scene-orientation properties the catalogue does not state."""
+	volume = metadata.VOLUMES.get(settings.scene_volume_id)
+	if volume is None:
+		return ("left_handed_coordinates", "z_direction_is_top_to_bottom")
+	return tuple(
+		name for name in ("left_handed_coordinates", "z_direction_is_top_to_bottom")
+		if getattr(volume, name) is None
+	)
+
+
+def refresh_scene_orientation(settings, shape_xyz=None):
+	"""Seed the scene frame from metadata/defaults and retain its volume shape.
+
+	User-edited flags win over metadata on later setup runs. The shape is not a
+	preference, so the loaded zarr remains authoritative when it is the scene
+	volume; otherwise the catalogue's shape is the only available source.
+	"""
+	global _setting_orientation
+	volume = metadata.VOLUMES.get(settings.scene_volume_id)
+	if not settings.orientation_user_set:
+		left_handed = (
+			volume.left_handed_coordinates
+			if volume is not None and volume.left_handed_coordinates is not None
+			else False
+		)
+		z_top_to_bottom = (
+			volume.z_direction_is_top_to_bottom
+			if volume is not None and volume.z_direction_is_top_to_bottom is not None
+			else True
+		)
+		_setting_orientation = True
+		try:
+			settings.left_handed_coordinates = left_handed
+			settings.z_direction_is_top_to_bottom = z_top_to_bottom
+		finally:
+			_setting_orientation = False
+	if shape_xyz is None and volume is not None and volume.shape:
+		shape_xyz = tuple(reversed(volume.shape))
+	if shape_xyz is not None and len(shape_xyz) == 3:
+		try:
+			shape_xyz = tuple(max(0, int(size)) for size in shape_xyz)
+		except (TypeError, ValueError, OverflowError):
+			shape_xyz = None
+		if shape_xyz is not None:
+			settings.scene_shape_xyz = shape_xyz
+	settings.orientation_initialized = True
+
+
+def _orientation_updated(self, context):
+	if not _setting_orientation:
+		self.orientation_user_set = True
+	VolumeSamplerRenderEngine.rescale()
+	VolumeSamplerRenderEngine.request_redraw()
 
 
 def set_resolution(settings, resolution):
@@ -165,6 +223,8 @@ def _volume_path_updated(self, context):
 		# scene already holds where it is and comes out right if the pair is
 		# registered later on.
 		self.scene_volume_id = volume_id
+	if not self.orientation_initialized:
+		refresh_scene_orientation(self)
 	resolution = _volume_resolution(self, volume_id)
 	if resolution is not None:
 		set_resolution(self, resolution)
@@ -531,6 +591,43 @@ class velend_OT_set_resolution(bpy.types.Operator):
 		return {'FINISHED'}
 
 
+def _point_through(matrix, point):
+	point = np.asarray(point, dtype=np.float64)
+	return tuple(point @ matrix[:3, :3].T + matrix[:3, 3])
+
+
+def _scene_cursor_voxels_get(self):
+	try:
+		inverse = np.linalg.inv(VolumeSamplerRenderEngine.scene_from_voxels())
+		return _point_through(inverse, self.id_data.cursor.location)
+	except (AttributeError, TypeError, np.linalg.LinAlgError, ValueError):
+		return (0.0, 0.0, 0.0)
+
+
+def _scene_cursor_voxels_set(self, value):
+	try:
+		world = _point_through(VolumeSamplerRenderEngine.scene_from_voxels(), value)
+		self.id_data.cursor.location = world
+	except (AttributeError, TypeError, ValueError):
+		pass
+
+
+def _current_cursor_voxels_get(self):
+	try:
+		matrix = VolumeSamplerRenderEngine.compute_world_to_voxels()
+		return _point_through(matrix, self.id_data.cursor.location)
+	except (AttributeError, TypeError, ValueError):
+		return (0.0, 0.0, 0.0)
+
+
+def _current_cursor_voxels_set(self, value):
+	try:
+		matrix = VolumeSamplerRenderEngine.compute_world_from_voxels()
+		self.id_data.cursor.location = _point_through(matrix, value)
+	except (AttributeError, TypeError, ValueError):
+		pass
+
+
 class VelendSceneSettings(bpy.types.PropertyGroup):
 	sample_id: bpy.props.EnumProperty(
 		name="Sample",
@@ -567,6 +664,54 @@ class VelendSceneSettings(bpy.types.PropertyGroup):
 			"stay put in the other"
 		),
 		options=set(),
+	)
+	left_handed_coordinates: bpy.props.BoolProperty(
+		name="Left Handed Coordinates",
+		description=(
+			"Whether the original volume's voxel coordinate system is left handed"
+		),
+		default=False,
+		options=set(),
+		update=_orientation_updated,
+	)
+	z_direction_is_top_to_bottom: bpy.props.BoolProperty(
+		name="Z Direction Is Top to Bottom",
+		description=(
+			"Whether Z=0 is the physical top and increasing Z runs down the object"
+		),
+		default=True,
+		options=set(),
+		update=_orientation_updated,
+	)
+	orientation_initialized: bpy.props.BoolProperty(default=False, options={'HIDDEN'})
+	orientation_user_set: bpy.props.BoolProperty(default=False, options={'HIDDEN'})
+	scene_shape_xyz: bpy.props.IntVectorProperty(
+		name="Scene Volume Shape",
+		description="Full-resolution XYZ voxel dimensions of the original volume",
+		size=3,
+		default=(0, 0, 0),
+		min=0,
+		options={'HIDDEN'},
+	)
+	scene_cursor_voxels: bpy.props.FloatVectorProperty(
+		name="Original Volume",
+		description="3D cursor position in the original volume's XYZ voxels",
+		size=3,
+		subtype='XYZ',
+		precision=3,
+		get=_scene_cursor_voxels_get,
+		set=_scene_cursor_voxels_set,
+		options={'SKIP_SAVE'},
+	)
+	current_cursor_voxels: bpy.props.FloatVectorProperty(
+		name="Current Volume",
+		description="3D cursor position in the currently rendered volume's XYZ voxels",
+		size=3,
+		subtype='XYZ',
+		precision=3,
+		get=_current_cursor_voxels_get,
+		set=_current_cursor_voxels_set,
+		options={'SKIP_SAVE'},
 	)
 	source_url: bpy.props.StringProperty(
 		name="Source URL",
@@ -758,6 +903,25 @@ class SCENE_PT_velend(bpy.types.Panel):
 		field.enabled = False
 		field.prop(settings, "resolution")
 		row.operator("velend.set_resolution", text="", icon='GREASEPENCIL')
+		column.separator()
+		column.label(text="Original Volume Orientation")
+		column.prop(settings, "left_handed_coordinates")
+		column.prop(settings, "z_direction_is_top_to_bottom")
+		missing_orientation = orientation_metadata_missing(settings)
+		if missing_orientation and (
+			settings.scene_volume_id or settings.volume_path or settings.source_url
+		):
+			box = layout.box()
+			box.label(text="Orientation metadata is incomplete.", icon='ERROR')
+			if len(missing_orientation) == 2:
+				box.label(text="Using the editable values above.")
+			else:
+				label = (
+					"Left handed coordinates"
+					if missing_orientation[0] == "left_handed_coordinates"
+					else "Z direction"
+				)
+				box.label(text="%s is set by the checkbox above." % label)
 
 
 		layout.operator("velend.setup_scene", icon='SCENE_DATA')
@@ -853,6 +1017,22 @@ class RENDER_PT_velend_sampling(bpy.types.Panel):
 		column.prop(settings, "depth_colors")
 
 
+def _draw_volume_cursor(self, context):
+	"""Volume-space fields in Blender's own View > 3D Cursor panel."""
+	settings = context.scene.velend
+	if not settings.scene_volume_id and not (settings.volume_path or settings.source_url):
+		return
+	layout = self.layout
+	layout.separator()
+	column = layout.column()
+	column.enabled = bool(
+		settings.scene_resolution and all(size > 0 for size in settings.scene_shape_xyz)
+	)
+	column.prop(settings, "scene_cursor_voxels", text="Original Volume (voxels)")
+	if not _anchored(settings):
+		column.prop(settings, "current_cursor_voxels", text="Current Volume (voxels)")
+
+
 @bpy.app.handlers.persistent
 def _load_post(_file_path):
 	"""Bring a file saved before the scene's frame stated a voxel size of its
@@ -886,6 +1066,7 @@ def register():
 	bpy.utils.register_class(SCENE_PT_velend)
 	bpy.utils.register_class(RENDER_PT_velend_sampling)
 	bpy.types.Scene.velend = bpy.props.PointerProperty(type=VelendSceneSettings)
+	bpy.types.VIEW3D_PT_view3d_cursor.append(_draw_volume_cursor)
 	if _load_post not in bpy.app.handlers.load_post:
 		bpy.app.handlers.load_post.append(_load_post)
 	if not bpy.app.timers.is_registered(_watch_cache_usage):
@@ -893,6 +1074,7 @@ def register():
 
 
 def unregister():
+	bpy.types.VIEW3D_PT_view3d_cursor.remove(_draw_volume_cursor)
 	if bpy.app.timers.is_registered(_watch_cache_usage):
 		bpy.app.timers.unregister(_watch_cache_usage)
 	if _load_post in bpy.app.handlers.load_post:

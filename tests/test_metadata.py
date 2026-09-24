@@ -47,7 +47,14 @@ MANIFEST = {
             },
             'scans': {},
             'volumes': {
-                '20231027191953': {'id': '20231027191953', 'long_id': '20231027191953-3.240um'},
+                '20231027191953': {
+                    'id': '20231027191953',
+                    'long_id': '20231027191953-3.240um',
+                    'properties': {
+                        'left_handed_coordinates': False,
+                        'z_direction_is_top_to_bottom': False,
+                    },
+                },
                 '20231117143551': {'id': '20231117143551', 'long_id': '20231117143551-7.910um'},
                 '20241024131838': {'id': '20241024131838', 'long_id': '20241024131838-8.000um'},
             },
@@ -162,6 +169,60 @@ class VolumeTransformTests(unittest.TestCase):
         transforms[0]['matrix'] = [
             [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]
         self.assertIsNone(metadata.volume_transform('20231117143551', '20231027191953'))
+
+
+class VolumeOrientationTests(unittest.TestCase):
+    SHAPE = (10.0, 20.0, 30.0)
+
+    def test_right_handed_bottom_to_top_is_identity(self):
+        np.testing.assert_allclose(
+            metadata.volume_orientation(self.SHAPE, False, False), np.eye(4))
+
+    def test_right_handed_top_to_bottom_flips_y_and_z(self):
+        matrix = metadata.volume_orientation(self.SHAPE, False, True)
+        np.testing.assert_allclose(np.diag(matrix)[:3], [1.0, -1.0, -1.0])
+        np.testing.assert_allclose(matrix[:3, 3], [0.0, 20.0, 30.0])
+        self.assertGreater(np.linalg.det(matrix[:3, :3]), 0.0)
+
+    def test_left_handed_bottom_to_top_flips_y(self):
+        matrix = metadata.volume_orientation(self.SHAPE, True, False)
+        np.testing.assert_allclose(np.diag(matrix)[:3], [1.0, -1.0, 1.0])
+        np.testing.assert_allclose(matrix[:3, 3], [0.0, 20.0, 0.0])
+        self.assertLess(np.linalg.det(matrix[:3, :3]), 0.0)
+
+    def test_left_handed_top_to_bottom_flips_z(self):
+        matrix = metadata.volume_orientation(self.SHAPE, True, True)
+        np.testing.assert_allclose(np.diag(matrix)[:3], [1.0, 1.0, -1.0])
+        np.testing.assert_allclose(matrix[:3, 3], [0.0, 0.0, 30.0])
+        self.assertLess(np.linalg.det(matrix[:3, :3]), 0.0)
+
+    def test_every_case_keeps_the_bounding_box_positive(self):
+        corners = np.array([
+            [x, y, z] for x in (0.0, 10.0) for y in (0.0, 20.0)
+            for z in (0.0, 30.0)
+        ])
+        for left_handed in (False, True):
+            for top_to_bottom in (False, True):
+                matrix = metadata.volume_orientation(
+                    self.SHAPE, left_handed, top_to_bottom)
+                transformed = corners @ matrix[:3, :3].T + matrix[:3, 3]
+                np.testing.assert_allclose(transformed.min(axis=0), [0.0, 0.0, 0.0])
+                np.testing.assert_allclose(transformed.max(axis=0), self.SHAPE)
+
+    def test_volume_properties_accept_only_json_booleans(self):
+        parsed = metadata.parse(copy.deepcopy(MANIFEST))[2]
+        volume = parsed['20231027191953']
+        self.assertIs(volume.left_handed_coordinates, False)
+        self.assertIs(volume.z_direction_is_top_to_bottom, False)
+        missing = parsed['20231117143551']
+        self.assertIsNone(missing.left_handed_coordinates)
+        self.assertIsNone(missing.z_direction_is_top_to_bottom)
+
+        manifest = copy.deepcopy(MANIFEST)
+        manifest['samples']['PHercTest']['volumes']['20231027191953']['properties'][
+            'left_handed_coordinates'] = 'false'
+        volume = metadata.parse(manifest)[2]['20231027191953']
+        self.assertIsNone(volume.left_handed_coordinates)
 
 
 if __name__ == '__main__':
