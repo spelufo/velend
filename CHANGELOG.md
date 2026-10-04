@@ -1,11 +1,12 @@
-# v0.6.0 (main, unreleased)
+# v0.7.0 (main, unreleased)
 
-- Render an active tifxyz surface through its UV map to a full-resolution PNG at a chosen physical
-  pixel size, with renderer parameters and provenance embedded as JSON metadata.
-- Tifxyz import and export can optionally use coordinates in the volume
-  currently being rendered, applying its registration with the scene volume.
-- Tifxyz UV maps now flip both axes on import; export reverses those mappings
-  so tifxyz files retain their original row and column order across round trips.
+# v0.6.0
+
+- Keep surface renders, ink predictions, and paint annotations as Blender-native material image nodes and texture-paint slots. The Volume Sampler viewport and tifxyz PNG exporter can render a connected UV image alone or alpha-composited over the live volume.
+- Render an active tifxyz surface through its UV map to a full-resolution PNG at a chosen physical pixel size, with renderer parameters and provenance embedded as JSON metadata.
+- Take into account orientation metadata to present scrolls in the positive quadrant and matching their real world appearance and orientation, rotating/fliping axes as needed. Orientation metadata is displayed and can be adjusted if missing.
+- Tifxyz import and export can optionally use coordinates in the volume currently being rendered, applying its registration with the scene volume.
+- Tifxyz UV maps now flip both axes on import; export reverses those mappings so tifxyz files retain their original row and column order across round trips.
 
 # v0.5.0
 

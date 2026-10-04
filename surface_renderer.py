@@ -8,9 +8,11 @@ import bpy
 import gpu
 import numpy as np
 from gpu_extras.batch import batch_for_shader
+from mathutils import Matrix
 
 from . import bricks
 from . import commands
+from . import surface_images
 from .surface_output import PNGWriter, linear_rgba_to_srgb8, uv_output_size
 from . import uv_renderer
 from .renderer import VolumeSamplerRenderEngine as Engine
@@ -46,10 +48,10 @@ def _surface_info(context, obj, pixel_size_um, positions, uvs, object_matrix):
 
 def _metadata(
 	context, obj, shape, scale, source_voxel_um, width, height, pixel_size_um,
-	physical_size,
+	physical_size, material_info=None,
 ):
 	settings = context.scene.velend
-	return {
+	metadata = {
 		"schema": "velend.surface_render.v1",
 		"created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 		"generator": {
@@ -94,6 +96,9 @@ def _metadata(
 			"level_colors": settings.debug_level_colors,
 		},
 	}
+	if material_info is not None:
+		metadata["material"] = material_info
+	return metadata
 
 
 def _velend_version():
@@ -249,29 +254,45 @@ class velend_OT_render_tifxyz(bpy.types.Operator):
 		obj = bpy.data.objects.get(self._object_name)
 		if obj is None or obj.type != 'MESH':
 			raise ValueError("the active mesh no longer exists")
-		if Engine.pending_reset:
+		material = obj.active_material
+		self._render_mode, self._image, uv_name, node, warning = surface_images.render_source(
+			material
+		)
+		if warning and getattr(material, "velend_render_mode", 'AUTO') in {'TEXTURE', 'OVERLAY'}:
+			self.report({'WARNING'}, warning + "; rendering the volume instead")
+		self._needs_volume = self._render_mode in {'VOLUME', 'OVERLAY'}
+		if Engine.pending_reset and self._needs_volume:
 			Engine.apply_reset()
-		if Engine.get_volume() is None:
+		if self._needs_volume and Engine.get_volume() is None:
 			if Engine.load_future is not None:
 				return {'RUNNING_MODAL'}
 			raise ValueError(Engine.status()[0])
-		Engine.ensure_gpu_resources()
-		if Engine.shader is None or not Engine.residencies:
+		if self._needs_volume:
+			Engine.ensure_gpu_resources()
+		if self._needs_volume and (Engine.shader is None or not Engine.residencies):
 			raise ValueError(Engine.status()[0])
-		Engine.world_to_voxels = Engine.compute_world_to_voxels()
+		if self._needs_volume:
+			Engine.world_to_voxels = Engine.compute_world_to_voxels()
 
-		arrays = uv_renderer.mesh_arrays(obj)
+		arrays = uv_renderer.mesh_arrays(obj, uv_name if self._image is not None else None)
 		if arrays is None:
 			raise ValueError("the active mesh has no UV triangles")
 		self._positions, self._normals, self._uvs = arrays
-		self._batch = batch_for_shader(
-			self._uv_shader(), 'TRIS',
-			{'position': self._positions, 'normal': self._normals, 'uv': self._uvs},
-		)
+		if self._needs_volume:
+			self._batch = batch_for_shader(
+				self._uv_shader(), 'TRIS',
+				{'position': self._positions, 'normal': self._normals, 'uv': self._uvs},
+			)
+		if self._image is not None:
+			self._texture_shader = self._make_texture_shader()
+			self._texture_batch = batch_for_shader(
+				self._texture_shader, 'TRIS', {'uv': self._uvs}
+			)
 		object_matrix = np.asarray(obj.matrix_world, dtype=np.float64)
-		world = self._positions @ object_matrix[:3, :3].T
-		world += object_matrix[:3, 3]
-		self._voxels = Engine.to_voxels(world)
+		if self._needs_volume:
+			world = self._positions @ object_matrix[:3, :3].T
+			world += object_matrix[:3, 3]
+			self._voxels = Engine.to_voxels(world)
 		self._uv_triangles = self._uvs.reshape(-1, 3, 2)
 		self._uv_low = self._uv_triangles.min(axis=1)
 		self._uv_high = self._uv_triangles.max(axis=1)
@@ -283,9 +304,22 @@ class velend_OT_render_tifxyz(bpy.types.Operator):
 		shape, scale, source_um, self._width, self._height, physical_size = _surface_info(
 			context, obj, self.pixel_size_um, self._positions, self._uvs, object_matrix
 		)
+		material_info = {
+			"mode": self._render_mode.lower(),
+			"name": material.name if material else "",
+			"opacity": float(getattr(material, "velend_texture_opacity", 1.0)),
+		}
+		if self._image is not None:
+			material_info["image"] = {
+				"name": self._image.name,
+				"path": bpy.path.abspath(self._image.filepath) if self._image.filepath else "",
+				"size": list(self._image.size[:]),
+				"color_space": self._image.colorspace_settings.name,
+				"node": node.name,
+			}
 		metadata = _metadata(
 			context, obj, shape, scale, source_um, self._width, self._height,
-			self.pixel_size_um, physical_size,
+			self.pixel_size_um, physical_size, material_info,
 		)
 		parent = os.path.dirname(self._path) or "."
 		if not os.path.isdir(parent):
@@ -308,9 +342,37 @@ class velend_OT_render_tifxyz(bpy.types.Operator):
 			self._shader = Engine.create_shader(uv_renderer._VERTEX_SOURCE, source.read(), uv=True)
 		return self._shader
 
+	def _make_texture_shader(self):
+		interface = gpu.types.GPUStageInterfaceInfo("surface_export_texture_interface")
+		interface.smooth('VEC2', "texCoord")
+		info = gpu.types.GPUShaderCreateInfo()
+		info.push_constant('MAT4', "projectionMatrix")
+		info.push_constant('FLOAT', "opacity")
+		info.sampler(0, 'FLOAT_2D', "surfaceImage")
+		info.vertex_in(0, 'VEC2', "uv")
+		info.vertex_out(interface)
+		info.fragment_out(0, 'VEC4', "FragColor")
+		info.vertex_source("""
+			void main() {
+				texCoord = uv;
+				gl_Position = projectionMatrix * vec4(uv, 0.0f, 1.0f);
+			}
+		""")
+		info.fragment_source("""
+			void main() {
+				vec4 color = texture(surfaceImage, texCoord);
+				color.a *= opacity;
+				if (color.a <= 0.0f) discard;
+				FragColor = color;
+			}
+		""")
+		return gpu.shader.create_from_info(info)
+
 	def _tile_chunks(self, x0, x1, y0, y1):
 		u0, u1 = x0 / self._width, x1 / self._width
 		v0, v1 = 1.0 - y1 / self._height, 1.0 - y0 / self._height
+		if not self._needs_volume:
+			return (x0, x1, y0, y1, u0, u1, v0, v1, np.zeros((0, 3), dtype=np.int64))
 		mask = (
 			(self._uv_high[:, 0] >= u0) & (self._uv_low[:, 0] <= u1)
 			& (self._uv_high[:, 1] >= v0) & (self._uv_low[:, 1] <= v1)
@@ -362,7 +424,8 @@ class velend_OT_render_tifxyz(bpy.types.Operator):
 			self._phase = 'PREPARE_STRIP'
 			return
 		self._tile = self._tiles[self._tile_index]
-		_target_chunks(self._tile[-1])
+		if self._needs_volume:
+			_target_chunks(self._tile[-1])
 		self._phase = 'WAIT_TILE'
 
 	def _wait_tile(self, context):
@@ -371,11 +434,16 @@ class velend_OT_render_tifxyz(bpy.types.Operator):
 		offscreen = gpu.types.GPUOffScreen(width, height, format='RGBA16F')
 		try:
 			with offscreen.bind():
-				Engine.pump_uploads()
-				if Engine.loader.error:
+				if self._needs_volume:
+					Engine.pump_uploads()
+				if self._needs_volume and Engine.loader.error:
 					raise OSError(Engine.loader.error)
-				missing = any(Engine.missing_requests(level) for level in bricks.LEVELS)
-				if missing or Engine.pending_levels or not Engine.loader.idle():
+				missing = self._needs_volume and any(
+					Engine.missing_requests(level) for level in bricks.LEVELS
+				)
+				if self._needs_volume and (
+					missing or Engine.pending_levels or not Engine.loader.idle()
+				):
 					return {'RUNNING_MODAL'}
 				self._draw_tile(context, u0, u1, v0, v1, width, height)
 				framebuffer = gpu.state.active_framebuffer_get()
@@ -401,21 +469,41 @@ class velend_OT_render_tifxyz(bpy.types.Operator):
 		gpu.state.blend_set('NONE')
 		gpu.state.depth_test_set('NONE')
 		gpu.state.depth_mask_set(False)
-		self._shader.bind()
-		settings = context.scene.velend
-		self._shader.uniform_float('gamma', settings.gamma)
-		if settings.volumetric_rendering:
-			self._shader.uniform_float('tfactor', settings.tfactor)
-		for level in bricks.LEVELS:
-			self._shader.uniform_sampler('l%dAtlas' % level, Engine.atlases[level].texture)
-			self._shader.uniform_sampler(
-				'l%dPageTable' % level, Engine.atlases[level].page_texture
+		projection = _projection(u0, u1, v0, v1)
+		if self._needs_volume:
+			self._shader.bind()
+			settings = context.scene.velend
+			self._shader.uniform_float('gamma', settings.gamma)
+			if settings.volumetric_rendering:
+				self._shader.uniform_float('tfactor', settings.tfactor)
+			for level in bricks.LEVELS:
+				self._shader.uniform_sampler(
+					'l%dAtlas' % level, Engine.atlases[level].texture
+				)
+				self._shader.uniform_sampler(
+					'l%dPageTable' % level, Engine.atlases[level].page_texture
+				)
+			obj = bpy.data.objects[self._object_name]
+			Engine.update_uniform_buffer(projection, obj.matrix_world)
+			self._shader.uniform_block('volumeUniforms', Engine.uniform_buffer)
+			self._shader.uniform_float('uvOpacity', 1.0)
+			self._batch.draw(self._shader)
+		if self._image is not None:
+			gpu.state.blend_set(
+				'ALPHA' if self._render_mode == 'OVERLAY' else 'NONE'
 			)
-		obj = bpy.data.objects[self._object_name]
-		Engine.update_uniform_buffer(_projection(u0, u1, v0, v1), obj.matrix_world)
-		self._shader.uniform_block('volumeUniforms', Engine.uniform_buffer)
-		self._shader.uniform_float('uvOpacity', 1.0)
-		self._batch.draw(self._shader)
+			self._texture_shader.bind()
+			self._texture_shader.uniform_float('projectionMatrix', Matrix(projection))
+			material = bpy.data.objects[self._object_name].active_material
+			opacity = (
+				material.velend_texture_opacity if self._render_mode == 'OVERLAY' else 1.0
+			)
+			self._texture_shader.uniform_float('opacity', opacity)
+			self._texture_shader.uniform_sampler(
+				'surfaceImage', gpu.texture.from_image(self._image)
+			)
+			self._texture_batch.draw(self._texture_shader)
+			gpu.state.blend_set('NONE')
 
 	def _finish(self, context, error=None):
 		if getattr(self, "_timer", None) is not None:
@@ -437,6 +525,14 @@ class velend_OT_render_tifxyz(bpy.types.Operator):
 			print("velend:", error)
 			self.report({'ERROR'}, error)
 			return {'CANCELLED'}
+		obj = bpy.data.objects.get(self._object_name)
+		if obj is not None:
+			try:
+				image = bpy.data.images.load(self._path, check_existing=True)
+				image.reload()
+				surface_images.attach_image(obj, image, 'RENDER')
+			except Exception as attach_error:
+				self.report({'WARNING'}, "Rendered PNG, but could not attach it: %s" % attach_error)
 		self.report({'INFO'}, "Rendered tifxyz surface to %s" % self._path)
 		return {'FINISHED'}
 

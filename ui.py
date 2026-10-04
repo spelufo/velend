@@ -1045,6 +1045,7 @@ def _load_post(_file_path):
 	volume the way loading it would.
 	"""
 	for scene in bpy.data.scenes:
+		_set_texture_paint_defaults(scene)
 		settings = scene.velend
 		if settings.scene_resolution:
 			continue
@@ -1057,31 +1058,53 @@ def _load_post(_file_path):
 			settings.resolution = resolution
 
 
+def _set_texture_paint_defaults(scene):
+	"""Default Texture Paint backface culling off once per scene."""
+	marker = "_velend_texture_paint_defaults_set"
+	if scene.get(marker, False):
+		return
+	scene.tool_settings.image_paint.use_backface_culling = False
+	scene[marker] = True
+
+
+def _initialize_scene_defaults():
+	"""Wait until Blender releases restricted data access during add-on startup."""
+	if not hasattr(bpy.data, "scenes"):
+		return 0.1
+	for scene in bpy.data.scenes:
+		_set_texture_paint_defaults(scene)
+	return None
+
+
 def register():
 	bpy.utils.register_class(VelendPreferences)
 	bpy.utils.register_class(velend_OT_edit_metadata_overrides)
 	bpy.utils.register_class(velend_OT_reload_metadata)
 	bpy.utils.register_class(velend_OT_set_resolution)
 	bpy.utils.register_class(VelendSceneSettings)
+	bpy.types.Scene.velend = bpy.props.PointerProperty(type=VelendSceneSettings)
 	bpy.utils.register_class(SCENE_PT_velend)
 	bpy.utils.register_class(RENDER_PT_velend_sampling)
-	bpy.types.Scene.velend = bpy.props.PointerProperty(type=VelendSceneSettings)
 	bpy.types.VIEW3D_PT_view3d_cursor.append(_draw_volume_cursor)
 	if _load_post not in bpy.app.handlers.load_post:
 		bpy.app.handlers.load_post.append(_load_post)
 	if not bpy.app.timers.is_registered(_watch_cache_usage):
 		bpy.app.timers.register(_watch_cache_usage, persistent=True)
+	if not bpy.app.timers.is_registered(_initialize_scene_defaults):
+		bpy.app.timers.register(_initialize_scene_defaults, first_interval=0.0)
 
 
 def unregister():
 	bpy.types.VIEW3D_PT_view3d_cursor.remove(_draw_volume_cursor)
 	if bpy.app.timers.is_registered(_watch_cache_usage):
 		bpy.app.timers.unregister(_watch_cache_usage)
+	if bpy.app.timers.is_registered(_initialize_scene_defaults):
+		bpy.app.timers.unregister(_initialize_scene_defaults)
 	if _load_post in bpy.app.handlers.load_post:
 		bpy.app.handlers.load_post.remove(_load_post)
-	del bpy.types.Scene.velend
 	bpy.utils.unregister_class(RENDER_PT_velend_sampling)
 	bpy.utils.unregister_class(SCENE_PT_velend)
+	del bpy.types.Scene.velend
 	bpy.utils.unregister_class(VelendSceneSettings)
 	bpy.utils.unregister_class(velend_OT_set_resolution)
 	bpy.utils.unregister_class(velend_OT_reload_metadata)

@@ -572,7 +572,9 @@ def _link_surface(context, surface, place, step, voxel_size):
 	"""Build the surface's object and put it in the scene, selected."""
 	name = surface.uuid
 	obj = bpy.data.objects.new(name, _surface_mesh(name, surface, place))
-	obj.data.materials.append(_surface_uv_material(surface.shape))
+	material = _surface_uv_material(surface.shape).copy()
+	material.name = name + " Surface"
+	obj.data.materials.append(material)
 	# Where it came from and what it was read with, so that a later reload or
 	# export does not have to be told again.
 	obj["velend_tifxyz_path"] = surface.path

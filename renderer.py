@@ -14,6 +14,8 @@ from . import state
 _SHADERS_DIR = os.path.join(os.path.dirname(__file__), "shaders")
 _VERT_SHADER_PATH = os.path.join(_SHADERS_DIR, "volume.vert")
 _FRAG_SHADER_PATH = os.path.join(_SHADERS_DIR, "volume.frag")
+_TEXTURE_VERT_PATH = os.path.join(_SHADERS_DIR, "texture.vert")
+_TEXTURE_FRAG_PATH = os.path.join(_SHADERS_DIR, "texture.frag")
 _SHADER_WATCH_INTERVAL = 0.25
 # `area.tag_redraw()` only marks the area dirty; it does not wake Blender's
 # event loop. Without a timer forcing a wake-up, uploads queued from
@@ -32,6 +34,10 @@ _VIEW_WATCH_INTERVAL = 0.1
 class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	bl_idname = "VOLUME_SAMPLER"
 	bl_label = "Volume Sampler"
+	# Keep Blender's standard material node editor available. Velend only
+	# interprets a small image path, but the same material remains usable by
+	# EEVEE and Cycles.
+	bl_use_shading_nodes_custom = False
 
 	# Created on the first draw, where a GPU context is guaranteed to be active,
 	# and shared by all engine instances (Blender creates one per viewport).
@@ -40,6 +46,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	load_key = None
 	pyramid = None
 	shader = None
+	texture_shader = None
 	shader_mtimes = None
 	uniform_buffer = None
 
@@ -83,6 +90,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	# Rebuilt only when the geometry of the scene changes.
 	batches = {}
 	meshes = {}
+	material_meshes = {}
 
 	# The matrix the viewport this instance draws was last drawn with, as a plain
 	# tuple: hashable, and it keeps no reference to Blender's own data. Set per
@@ -366,8 +374,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		# The page table dimensions are baked into the fragment shader, so a
 		# volume of a different size needs the shader compiled again.
 		cls.shader = None
+		cls.texture_shader = None
 		cls.shader_mtimes = None
 		cls.batches.clear()
+		cls.material_meshes.clear()
 
 	@classmethod
 	def retarget_now(cls):
@@ -389,6 +399,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		return (
 			os.stat(_VERT_SHADER_PATH).st_mtime_ns,
 			os.stat(_FRAG_SHADER_PATH).st_mtime_ns,
+			os.stat(_TEXTURE_VERT_PATH).st_mtime_ns,
+			os.stat(_TEXTURE_FRAG_PATH).st_mtime_ns,
 			os.stat(atlas_module.COPY_SHADER_PATH).st_mtime_ns,
 		)
 
@@ -396,6 +408,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	def reload_shaders(cls):
 		"""Drop the compiled shaders so the next draw builds them again."""
 		cls.shader = None
+		cls.texture_shader = None
 		cls.shader_mtimes = None
 		cls.request_redraw()
 
@@ -410,7 +423,10 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	def request_redraw(cls):
 		for window in bpy.context.window_manager.windows:
 			for area in window.screen.areas:
-				if area.type == 'PROPERTIES' or (area.type == 'IMAGE_EDITOR' and area.spaces.active.mode == 'UV'):
+				image_uv = (
+					area.type == 'IMAGE_EDITOR' and area.spaces.active.mode == 'UV'
+				)
+				if area.type == 'PROPERTIES' or image_uv:
 					area.tag_redraw()
 		for engine in list(cls.live_instances):
 			try:
@@ -496,6 +512,31 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.shader_mtimes = mtimes
 		cls.batches.clear()
 		print("Loaded shaders")
+
+	@classmethod
+	def ensure_texture_shader(cls):
+		if cls.texture_shader is not None:
+			return
+		try:
+			with open(_TEXTURE_VERT_PATH, encoding="utf-8") as file:
+				vert_source = file.read()
+			with open(_TEXTURE_FRAG_PATH, encoding="utf-8") as file:
+				frag_source = file.read()
+			interface = gpu.types.GPUStageInterfaceInfo("surface_texture_interface")
+			interface.smooth('VEC2', "texCoord")
+			info = gpu.types.GPUShaderCreateInfo()
+			info.push_constant('MAT4', "modelViewProjectionMatrix")
+			info.push_constant('FLOAT', "opacity")
+			info.sampler(0, 'FLOAT_2D', "surfaceImage")
+			info.vertex_in(0, 'VEC3', "position")
+			info.vertex_in(1, 'VEC2', "uv")
+			info.vertex_out(interface)
+			info.fragment_out(0, 'VEC4', "FragColor")
+			info.vertex_source(vert_source)
+			info.fragment_source(frag_source)
+			cls.texture_shader = gpu.shader.create_from_info(info)
+		except Exception as error:
+			print("Texture shader compile failed:", error)
 
 	@classmethod
 	def create_shader(cls, vert_source, frag_source, uv=False):
@@ -633,6 +674,41 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		cls.meshes[name] = arrays
 		return arrays
 
+	@classmethod
+	def material_arrays(cls, obj_eval):
+		"""Triangle corner positions and UVs grouped by evaluated material slot."""
+		key = (obj_eval.name, "materials")
+		if key in cls.material_meshes:
+			return cls.material_meshes[key]
+		mesh = obj_eval.to_mesh()
+		mesh.calc_loop_triangles()
+		groups = {}
+		if mesh.loop_triangles:
+			positions = np.empty((len(mesh.vertices), 3), dtype='f')
+			normals = np.empty_like(positions)
+			mesh.vertices.foreach_get("co", positions.ravel())
+			mesh.vertices.foreach_get("normal", normals.ravel())
+			uv_layers = {}
+			for layer in mesh.uv_layers:
+				values = np.empty((len(mesh.loops), 2), dtype='f')
+				layer.data.foreach_get("uv", values.ravel())
+				uv_layers[layer.name] = values
+			for triangle in mesh.loop_triangles:
+				group = groups.setdefault(triangle.material_index, [[], [], {}])
+				group[0].extend(positions[list(triangle.vertices)])
+				group[1].extend(normals[list(triangle.vertices)])
+				for name, values in uv_layers.items():
+					group[2].setdefault(name, []).extend(values[list(triangle.loops)])
+		for group in groups.values():
+			group[0] = np.asarray(group[0], dtype='f')
+			group[1] = np.asarray(group[1], dtype='f')
+			group[2] = {
+				name: np.asarray(values, dtype='f') for name, values in group[2].items()
+			}
+		obj_eval.to_mesh_clear()
+		cls.material_meshes[key] = groups
+		return groups
+
 	@staticmethod
 	def instance_visible(instance, depsgraph, viewport=None):
 		"""Effective viewport visibility, including the owning collection."""
@@ -693,6 +769,8 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		# runs, and extracting them per mesh would just repeat the inversion.
 		planes_list = cls.view_frusta()
 
+		from . import surface_images
+
 		found = []
 		for instance in depsgraph.object_instances:
 			# The iterator can retain hidden instancers and objects whose layer
@@ -701,6 +779,12 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 				continue
 			obj = instance.object
 			if obj.type != 'MESH':
+				continue
+			materials = [slot.material for slot in obj.material_slots]
+			if materials and all(
+				surface_images.render_source(material)[0] == 'TEXTURE'
+				for material in materials
+			):
 				continue
 			arrays = cls.mesh_arrays(obj)
 			if arrays is None:
@@ -884,16 +968,20 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		# This runs outside of the drawing code, without an active GPU context,
 		# so it only invalidates the caches used by `view_draw` and queues reads;
 		# it never touches the GPU itself.
+		if not hasattr(context.scene, "velend"):
+			return
 		self.live_instances.add(self)
 		geometry_changed = False
 		transform_changed = False
 		visibility_changed = False
+		shading_changed = False
 		for update in depsgraph.updates:
 			geometry = update.is_updated_geometry
 			transform = update.is_updated_transform
 			shading = update.is_updated_shading
 			geometry_changed |= geometry
 			transform_changed |= transform
+			shading_changed |= shading
 			# Blender exposes no dedicated visibility flag. Hide/show arrives as
 			# an otherwise-unclassified depsgraph update.
 			visibility_changed |= not (geometry or transform or shading)
@@ -904,6 +992,9 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			# every draw regardless.
 			self.batches.clear()
 			self.meshes.clear()
+			self.material_meshes.clear()
+		if shading_changed:
+			self.batches.clear()
 
 		if (geometry_changed or transform_changed or visibility_changed) and self.residencies:
 			# Hide/show changes have neither the geometry nor transform flag, but
@@ -913,6 +1004,11 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			self.retarget(depsgraph, context.scene.cursor.location)
 
 	def view_draw(self, context, depsgraph):
+		from gpu_extras.batch import batch_for_shader
+		from . import surface_images
+
+		if not hasattr(context.scene, "velend"):
+			return
 		self.live_instances.add(self)
 		# Recorded rather than acted on: `_watch_view` retargets once the view
 		# has settled, so orbiting does not walk every mesh on each frame.
@@ -923,55 +1019,94 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 			)
 		if self.pending_reset:
 			self.apply_reset()
-		first_init = not self.residencies
-		self.ensure_gpu_resources()
-		if first_init and self.residencies:
-			# Otherwise nothing streams in until geometry changes or the operator
-			# runs, even though the grid (and so a focus point) already exists.
-			self.retarget(depsgraph, context.scene.cursor.location)
-		if self.shader is None:
-			return
-		self.pump_uploads()
-		self.shader.bind()
-		self.shader.uniform_float("gamma", context.scene.velend.gamma)
-		if context.scene.velend.volumetric_rendering:
-			self.shader.uniform_float("tfactor", context.scene.velend.tfactor)
-
-		# Blender clears the color and depth buffers before the engine draws. Writing depth
-		# is what lets it occlude the overlays that are drawn on top of the result.
-		gpu.state.depth_test_set('LESS_EQUAL')
-		gpu.state.depth_mask_set(True)
-
-		for level in bricks.LEVELS:
-			self.shader.uniform_sampler(
-				"l%dAtlas" % level, self.atlases[level].texture
-			)
-			self.shader.uniform_sampler(
-				"l%dPageTable" % level, self.atlases[level].page_texture
-			)
-
-		# Iterating the instances also draws the duplis and the geometry nodes instances,
-		# which share the batch of the object they instance.
+		# Resolve face materials before touching the volume. Texture-only scenes do
+		# not need a configured zarr at all.
+		draws = []
 		for instance in depsgraph.object_instances:
 			if not self.instance_visible(instance, depsgraph, context.space_data):
 				continue
 			obj = instance.object
 			if obj.type != 'MESH':
 				continue
-			if obj.name not in self.batches:
-				self.batches[obj.name] = self.batch_from_object(obj)
-			batch = self.batches[obj.name]
-			if batch is None:
-				continue
-			self.update_uniform_buffer(
-				context.region_data.perspective_matrix,
-				instance.matrix_world,
-			)
-			self.shader.uniform_block("volumeUniforms", self.uniform_buffer)
-			batch.draw(self.shader)
+			for material_index, arrays in self.material_arrays(obj).items():
+				material = (
+					obj.material_slots[material_index].material
+					if material_index < len(obj.material_slots) else None
+				)
+				mode, image, uv_name, _node, _warning = surface_images.render_source(material)
+				draws.append((
+					instance.matrix_world.copy(), obj, material_index, arrays, material,
+					mode, image, uv_name,
+				))
+
+		need_volume = any(draw[5] in {'VOLUME', 'OVERLAY'} for draw in draws)
+		if need_volume:
+			first_init = not self.residencies
+			self.ensure_gpu_resources()
+			if first_init and self.residencies:
+				self.retarget(depsgraph, context.scene.cursor.location)
+			if self.shader is not None:
+				self.pump_uploads()
+				self.shader.bind()
+				self.shader.uniform_float("gamma", context.scene.velend.gamma)
+				if context.scene.velend.volumetric_rendering:
+					self.shader.uniform_float("tfactor", context.scene.velend.tfactor)
+				for level in bricks.LEVELS:
+					self.shader.uniform_sampler(
+						"l%dAtlas" % level, self.atlases[level].texture
+					)
+					self.shader.uniform_sampler(
+						"l%dPageTable" % level, self.atlases[level].page_texture
+					)
+				gpu.state.depth_test_set('LESS_EQUAL')
+				gpu.state.depth_mask_set(True)
+				for matrix, obj, index, arrays, _material, mode, *_rest in draws:
+					if mode not in {'VOLUME', 'OVERLAY'}:
+						continue
+					key = (obj.name, index, 'volume')
+					if key not in self.batches:
+						self.batches[key] = batch_for_shader(
+							self.shader, 'TRIS',
+							{"position": arrays[0], "normal": arrays[1]},
+						)
+					self.update_uniform_buffer(
+						context.region_data.perspective_matrix, matrix
+					)
+					self.shader.uniform_block("volumeUniforms", self.uniform_buffer)
+					self.batches[key].draw(self.shader)
+
+		texture_draws = [draw for draw in draws if draw[5] in {'TEXTURE', 'OVERLAY'}]
+		if texture_draws:
+			self.ensure_texture_shader()
+		if self.texture_shader is not None:
+			self.texture_shader.bind()
+			for matrix, obj, index, arrays, material, mode, image, uv_name in texture_draws:
+				uvs = arrays[2].get(uv_name)
+				if uvs is None:
+					continue
+				key = (obj.name, index, 'texture', uv_name)
+				if key not in self.batches:
+					self.batches[key] = batch_for_shader(
+						self.texture_shader, 'TRIS', {"position": arrays[0], "uv": uvs}
+					)
+				gpu.state.blend_set('ALPHA')
+				gpu.state.depth_test_set('LESS_EQUAL')
+				gpu.state.depth_mask_set(mode == 'TEXTURE')
+				self.texture_shader.uniform_float(
+					"modelViewProjectionMatrix",
+					context.region_data.perspective_matrix @ matrix,
+				)
+				self.texture_shader.uniform_float(
+					"opacity", material.velend_texture_opacity if mode == 'OVERLAY' else 1.0
+				)
+				self.texture_shader.uniform_sampler(
+					"surfaceImage", gpu.texture.from_image(image)
+				)
+				self.batches[key].draw(self.texture_shader)
 
 		gpu.state.depth_mask_set(False)
 		gpu.state.depth_test_set('NONE')
+		gpu.state.blend_set('NONE')
 
 
 def _watch_shader_files():
@@ -1011,7 +1146,7 @@ class velend_OT_report_cache_limit(bpy.types.Operator):
 def _watch_cursor():
 	cls = VolumeSamplerRenderEngine
 	scene = bpy.context.scene
-	if not cls.residencies or scene is None:
+	if not cls.residencies or scene is None or not hasattr(scene, "velend"):
 		return _CURSOR_WATCH_INTERVAL
 	cursor = tuple(scene.cursor.location)
 	if cursor != cls.last_cursor:
@@ -1029,7 +1164,8 @@ def _watch_view():
 	"""
 	cls = VolumeSamplerRenderEngine
 	scene = bpy.context.scene
-	if not cls.residencies or scene is None or not scene.velend.frustum_culling:
+	if (not cls.residencies or scene is None or not hasattr(scene, "velend")
+			or not scene.velend.frustum_culling):
 		return _VIEW_WATCH_INTERVAL
 	# `live_instances` is a WeakSet, whose iteration order says nothing, so the
 	# key is sorted rather than taken in the order the instances come out in.

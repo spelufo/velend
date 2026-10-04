@@ -16,6 +16,7 @@ from . import umbilicus
 from . import volpkg
 from . import commands
 from . import surface_output
+from . import surface_images
 from . import surface_renderer
 from . import ui
 
@@ -29,6 +30,7 @@ _modules = [
 	volpkg,
 	commands,
 	surface_output,
+	surface_images,
 	surface_renderer,
 	ui,
 ]

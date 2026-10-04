@@ -15,6 +15,8 @@ _handler = None
 _shader = None
 _source_shader = None
 _batch = None
+_texture_batch = None
+_texture_key = None
 _mesh_key = None
 _dirty = True
 _keymaps = []
@@ -103,7 +105,7 @@ class IMAGE_PT_velend(bpy.types.Panel):
 
 	@classmethod
 	def poll(cls, context):
-		return context.space_data.mode == 'UV'
+		return hasattr(context.scene, "velend") and context.space_data.mode == 'UV'
 
 	def draw(self, context):
 		self.layout.prop(context.scene.velend, "uv_volume_rendering")
@@ -111,11 +113,11 @@ class IMAGE_PT_velend(bpy.types.Panel):
 		self.layout.operator("velend.render_tifxyz", icon='EXPORT')
 
 
-def mesh_arrays(obj):
+def mesh_arrays(obj, uv_name=None):
 	"""Read corner attributes for seams, including live edits from BMesh."""
 	if obj.mode == 'EDIT':
 		bm = bmesh.from_edit_mesh(obj.data)
-		layer = bm.loops.layers.uv.active
+		layer = bm.loops.layers.uv.get(uv_name) if uv_name else bm.loops.layers.uv.active
 		if layer is None:
 			return None
 		triangles = [tri for tri in bm.calc_loop_triangles() if not tri[0].face.hide]
@@ -127,7 +129,7 @@ def mesh_arrays(obj):
 			np.asarray([loop[layer].uv[:] for tri in triangles for loop in tri], dtype='f'),
 		)
 	mesh = obj.data
-	layer = mesh.uv_layers.active
+	layer = mesh.uv_layers.get(uv_name) if uv_name else mesh.uv_layers.active
 	if layer is None:
 		return None
 	mesh.calc_loop_triangles()
@@ -147,60 +149,127 @@ def mesh_arrays(obj):
 
 
 def _draw():
-	global _shader, _source_shader, _batch, _mesh_key, _dirty
+	global _shader, _source_shader, _batch, _texture_batch, _texture_key
+	global _mesh_key, _dirty
 	context = bpy.context
 	space = context.space_data
 	obj = context.active_object
-	if (space is None or space.type != 'IMAGE_EDITOR' or space.mode != 'UV'
-			or obj is None or obj.type != 'MESH' or not obj.data.uv_layers.active
-			or not context.scene.velend.volume_path.strip()
-			or not context.scene.velend.uv_volume_rendering):
+	if (context.scene is None or not hasattr(context.scene, "velend")
+			or space is None or space.type != 'IMAGE_EDITOR' or space.mode != 'UV'
+			or obj is None or obj.type != 'MESH' or not obj.data.uv_layers.active):
 		return
-	if Engine.pending_reset:
-		Engine.apply_reset()
-	first_init = not Engine.residencies
-	Engine.ensure_gpu_resources()
-	if Engine.shader is None or not Engine.residencies:
+	from . import surface_images
+
+	settings = context.scene.velend
+	material = obj.active_material
+	mode, image, image_uv, _node, _warning = surface_images.render_source(material)
+	draw_volume = (
+		settings.uv_volume_rendering
+		and bool(settings.volume_path.strip())
+		and mode in {'VOLUME', 'OVERLAY'}
+	)
+	draw_image = image is not None and mode in {'TEXTURE', 'OVERLAY'}
+	if not draw_volume and not draw_image:
 		return
-	if first_init or _dirty:
-		Engine.meshes.clear()
-		Engine.retarget(context.evaluated_depsgraph_get(), context.scene.cursor.location)
-	Engine.pump_uploads()
-	if _source_shader is not Engine.shader:
-		path = os.path.join(os.path.dirname(__file__), 'shaders', 'volume.frag')
-		with open(path, encoding='utf-8') as source:
-			_shader = Engine.create_shader(_VERTEX_SOURCE, source.read(), uv=True)
-		_source_shader = Engine.shader
-		_mesh_key = None
-	key = (obj.as_pointer(), obj.data.as_pointer(), obj.mode, obj.data.uv_layers.active.name)
-	if _dirty or key != _mesh_key:
-		arrays = mesh_arrays(obj)
-		_batch = None if arrays is None else batch_for_shader(
-			_shader, 'TRIS', {'position': arrays[0], 'normal': arrays[1], 'uv': arrays[2]},
-		)
-		_mesh_key = key
-		_dirty = False
-	if _batch is None:
-		return
+
+	if draw_volume:
+		if Engine.pending_reset:
+			Engine.apply_reset()
+		first_init = not Engine.residencies
+		Engine.ensure_gpu_resources()
+		if Engine.shader is None or not Engine.residencies:
+			draw_volume = False
+		else:
+			if first_init or _dirty:
+				Engine.meshes.clear()
+				Engine.retarget(
+					context.evaluated_depsgraph_get(), context.scene.cursor.location
+				)
+			Engine.pump_uploads()
+			if _source_shader is not Engine.shader:
+				path = os.path.join(os.path.dirname(__file__), 'shaders', 'volume.frag')
+				with open(path, encoding='utf-8') as source:
+					_shader = Engine.create_shader(_VERTEX_SOURCE, source.read(), uv=True)
+				_source_shader = Engine.shader
+				_mesh_key = None
+			key = (
+				obj.as_pointer(), obj.data.as_pointer(), obj.mode,
+				obj.data.uv_layers.active.name,
+			)
+			if _dirty or key != _mesh_key:
+				arrays = mesh_arrays(obj)
+				_batch = None if arrays is None else batch_for_shader(
+					_shader, 'TRIS', {
+						'position': arrays[0], 'normal': arrays[1], 'uv': arrays[2],
+					},
+				)
+			_mesh_key = key
+			_dirty = False
+
+	if draw_image:
+		Engine.ensure_texture_shader()
+		if Engine.texture_shader is None:
+			draw_image = False
+		else:
+			key = (
+				obj.as_pointer(), obj.data.as_pointer(), obj.mode, image_uv,
+				image.as_pointer(),
+			)
+			if _dirty or key != _texture_key:
+				arrays = mesh_arrays(obj, image_uv)
+				if arrays is None:
+					_texture_batch = None
+				else:
+					positions = np.zeros((len(arrays[2]), 3), dtype='f')
+					positions[:, :2] = arrays[2]
+					_texture_batch = batch_for_shader(
+						Engine.texture_shader, 'TRIS',
+						{'position': positions, 'uv': arrays[2]},
+					)
+				_texture_key = key
+		if not draw_volume:
+			_dirty = False
 
 	blend = gpu.state.blend_get()
 	depth_test = gpu.state.depth_test_get()
 	depth_mask = gpu.state.depth_mask_get()
 	try:
-		gpu.state.blend_set('ALPHA')
-		gpu.state.depth_test_set('LESS_EQUAL')
-		gpu.state.depth_mask_set(False)
-		_shader.bind()
-		_shader.uniform_float('gamma', context.scene.velend.gamma)
-		if context.scene.velend.volumetric_rendering:
-			_shader.uniform_float('tfactor', context.scene.velend.tfactor)
-		for level in bricks.LEVELS:
-			_shader.uniform_sampler('l%dAtlas' % level, Engine.atlases[level].texture)
-			_shader.uniform_sampler('l%dPageTable' % level, Engine.atlases[level].page_texture)
-		Engine.update_uniform_buffer(gpu.matrix.get_projection_matrix(), obj.matrix_world)
-		_shader.uniform_block('volumeUniforms', Engine.uniform_buffer)
-		_shader.uniform_float('uvOpacity', 1.0 - context.scene.velend.uv_transparency)
-		_batch.draw(_shader)
+		if draw_volume and _batch is not None:
+			gpu.state.blend_set('ALPHA')
+			gpu.state.depth_test_set('LESS_EQUAL')
+			gpu.state.depth_mask_set(False)
+			_shader.bind()
+			_shader.uniform_float('gamma', settings.gamma)
+			if settings.volumetric_rendering:
+				_shader.uniform_float('tfactor', settings.tfactor)
+			for level in bricks.LEVELS:
+				_shader.uniform_sampler(
+					'l%dAtlas' % level, Engine.atlases[level].texture
+				)
+				_shader.uniform_sampler(
+					'l%dPageTable' % level, Engine.atlases[level].page_texture
+				)
+			Engine.update_uniform_buffer(
+				gpu.matrix.get_projection_matrix(), obj.matrix_world
+			)
+			_shader.uniform_block('volumeUniforms', Engine.uniform_buffer)
+			_shader.uniform_float('uvOpacity', 1.0 - settings.uv_transparency)
+			_batch.draw(_shader)
+		if draw_image and _texture_batch is not None:
+			gpu.state.blend_set('ALPHA')
+			gpu.state.depth_test_set('NONE')
+			gpu.state.depth_mask_set(False)
+			Engine.texture_shader.bind()
+			Engine.texture_shader.uniform_float(
+				'modelViewProjectionMatrix', gpu.matrix.get_projection_matrix()
+			)
+			Engine.texture_shader.uniform_float(
+				'opacity', material.velend_texture_opacity if mode == 'OVERLAY' else 1.0
+			)
+			Engine.texture_shader.uniform_sampler(
+				'surfaceImage', gpu.texture.from_image(image)
+			)
+			_texture_batch.draw(Engine.texture_shader)
 	finally:
 		gpu.state.depth_mask_set(depth_mask)
 		gpu.state.depth_test_set(depth_test)
@@ -209,8 +278,9 @@ def _draw():
 
 @bpy.app.handlers.persistent
 def _invalidate(*_args):
-	global _dirty
+	global _dirty, _texture_key
 	_dirty = True
+	_texture_key = None
 	_redraw()
 
 
@@ -243,7 +313,8 @@ def register():
 
 
 def unregister():
-	global _handler, _shader, _source_shader, _batch, _mesh_key
+	global _handler, _shader, _source_shader, _batch, _texture_batch
+	global _texture_key, _mesh_key
 	for keymap, item in _keymaps:
 		keymap.keymap_items.remove(item)
 	_keymaps.clear()
@@ -254,6 +325,7 @@ def unregister():
 		bpy.types.SpaceImageEditor.draw_handler_remove(_handler, 'WINDOW')
 		_handler = None
 	_batch = _shader = _source_shader = _mesh_key = None
+	_texture_batch = _texture_key = None
 	_redraw()
 	bpy.utils.unregister_class(IMAGE_PT_velend)
 	bpy.utils.unregister_class(velend_OT_cursor_from_uv)
