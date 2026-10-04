@@ -580,6 +580,7 @@ def _link_surface(context, surface, place, step, voxel_size):
 	obj["velend_tifxyz_scale"] = list(surface.scale)
 	obj["velend_tifxyz_step"] = step
 	obj["velend_tifxyz_shape"] = surface.shape
+	obj["velend_tifxyz_source_shape"] = surface.source_shape
 	obj["velend_tifxyz_voxel_size"] = voxel_size
 	obj["velend_tifxyz_meta"] = json.dumps(surface.meta)
 	obj["velend_tifxyz_placement"] = place.matrix.ravel().tolist()

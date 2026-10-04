@@ -93,6 +93,9 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 	# retargeted for them.
 	last_view_key = None
 	view_settled = False
+	# A UV export temporarily owns the shared atlases. Cursor, geometry and view
+	# watchers leave its exact per-tile working set alone until it has finished.
+	exporting = False
 
 	# One instance per viewport that has drawn at least once. `Area.tag_redraw()`
 	# only marks the region dirty, which a RENDERED-shading viewport treats as
@@ -664,7 +667,7 @@ class VolumeSamplerRenderEngine(bpy.types.RenderEngine):
 		only decides what the working set should be and queues the reads.
 		`pump_uploads` moves the results onto the GPU on the following draws.
 		"""
-		if cls.pending_reset:
+		if cls.pending_reset or cls.exporting:
 			return 0
 		cls.last_cursor = tuple(focus)
 		cls.ensure_grid()

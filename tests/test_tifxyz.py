@@ -223,6 +223,7 @@ class ReadSurfaceTest(unittest.TestCase):
 		path = write_surface(self.root / "seg", x, y, z)
 		surface = tifxyz.read_surface(path, step=2)
 		self.assertEqual(surface.shape, (3, 3))
+		self.assertEqual(surface.source_shape, (5, 5))
 		self.assertEqual(len(surface.quads), 4)
 		# Same corners, four times fewer quads between them.
 		self.assertEqual(surface.positions[0].tolist(), [100.0, 200.0, 300.0])

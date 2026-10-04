@@ -204,10 +204,11 @@ class Surface:
 	vertex for each extra channel that was read.
 	"""
 
-	def __init__(self, path, meta, shape, positions, quads, uvs, channels):
+	def __init__(self, path, meta, shape, positions, quads, uvs, channels, source_shape=None):
 		self.path = path
 		self.meta = meta
 		self.shape = shape
+		self.source_shape = tuple(source_shape or shape)
 		self.positions = positions
 		self.quads = quads
 		self.uvs = uvs
@@ -244,6 +245,7 @@ def read_surface(directory, step=1, load_channels=True):
 	"""
 	meta = read_meta(directory)
 	x, y, z = read_coordinates(directory)
+	source_shape = x.shape
 	valid = valid_points(x, y, z)
 	loaded_mask = read_mask(directory, valid.shape)
 	if loaded_mask is not None:
@@ -260,7 +262,7 @@ def read_surface(directory, step=1, load_channels=True):
 		channels = {name: channel[sample] for name, channel in channels.items()}
 	positions, quads, uvs, values = surface_arrays(x, y, z, valid, channels)
 	return Surface(
-		directory, meta, valid.shape, positions, quads, uvs, values
+		directory, meta, valid.shape, positions, quads, uvs, values, source_shape
 	)
 
 

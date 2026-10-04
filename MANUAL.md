@@ -61,6 +61,15 @@ File > Export > Scroll Umbilicus writes the active mesh as `umbilicus.json`, wit
 
 The UV Editor renders the volume on the active mesh's active UV map, including live Edit Mode changes. Select an imported segment and open the UV Editor to see its flattened scan. Shift-right-click a UV face to put the 3D cursor at that point on the mesh and load high-resolution detail around it. The Velend tab in the UV Editor sidebar can turn the volume drawing off or adjust its transparency from 0 (opaque) to 1 (invisible).
 
+**File > Export > Rendered tifxyz Surface (.png)** saves that flattened rendering for the active
+surface. **Pixel Size** is the physical width of an output pixel in micrometers and starts at the
+current volume's voxel size. Image dimensions come from the physical stretch of the mesh's UV
+parameterization, rather than from the tifxyz grid dimensions. Export streams the surface tile by
+tile and waits for full-resolution volume bricks; transparent pixels mark UV holes and the area
+outside the surface. The PNG contains a
+`velend` JSON metadata field with its physical resolution, surface and volume provenance, and
+sampling and shading parameters. The same command is in the UV Editor's Velend tab.
+
 This currently uses the editable mesh, before modifiers. Overlapping UV faces overwrite one another. UV edges and vertices are depth-tested against the volume drawing; translucent face-selection and stretch overlays are not preserved by this drawing pass.
 
 

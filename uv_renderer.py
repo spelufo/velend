@@ -108,6 +108,7 @@ class IMAGE_PT_velend(bpy.types.Panel):
 	def draw(self, context):
 		self.layout.prop(context.scene.velend, "uv_volume_rendering")
 		self.layout.prop(context.scene.velend, "uv_transparency")
+		self.layout.operator("velend.render_tifxyz", icon='EXPORT')
 
 
 def mesh_arrays(obj):

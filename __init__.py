@@ -15,6 +15,8 @@ from . import tifxyz
 from . import umbilicus
 from . import volpkg
 from . import commands
+from . import surface_output
+from . import surface_renderer
 from . import ui
 
 _modules = [
@@ -26,6 +28,8 @@ _modules = [
 	umbilicus,
 	volpkg,
 	commands,
+	surface_output,
+	surface_renderer,
 	ui,
 ]
 

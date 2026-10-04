@@ -1,5 +1,7 @@
 # v0.6.0 (main, unreleased)
 
+- Render an active tifxyz surface through its UV map to a full-resolution PNG at a chosen physical
+  pixel size, with renderer parameters and provenance embedded as JSON metadata.
 - Tifxyz import and export can optionally use coordinates in the volume
   currently being rendered, applying its registration with the scene volume.
 - Tifxyz UV maps now flip both axes on import; export reverses those mappings
